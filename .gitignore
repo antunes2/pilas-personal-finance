@@ -1,0 +1,34 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+
+# Sensitive data - never commit
+.env
+.TXT.txt
+
+# Supabase specific
+.local/share/supabase/
+
+# Personal notes / temporary files
+TXT.txt
+
+# Phase-based planning docs (keep these out of git for now, 
+# they're for human/AI reference only during development)
+docs/*.md
+
+# Bot token and credentials (override .env if needed)
+# These should be set as environment variables in production, not in git
+BOT_TOKEN=
+OPENROUTER_API_KEY=
+SUPABASE_URL=
+SUPABASE_SECRET_KEY=
+
+# Always add your specific user IDs to .env, not here
+# ALLOWED_USER_IDS=123456789,987654321
