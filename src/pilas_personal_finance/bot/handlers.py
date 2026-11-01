@@ -5,6 +5,7 @@ Contains /start, /ajuda, /adicionar, /fixos, /orcamento, /receber and natural me
 
 import re
 import os
+import logging
 from datetime import datetime
 from typing import Optional, List
 import pytz
@@ -22,6 +23,8 @@ from pilas_personal_finance.services.recurring_expense_service import (
 )
 from pilas_personal_finance.repositories import AppUsersRepo
 
+logger = logging.getLogger(__name__)
+
 
 def get_supabase():
     """Create and return a fresh Supabase client from environment variables."""
@@ -34,25 +37,13 @@ def get_supabase():
 # or read from environment variables ALLOWED_USER_IDS and ALLOWED_USERNAMES
 def load_allowed_user_ids() -> set:
     """Load allowed Telegram user IDs from environment."""
-    import os
-    from dotenv import load_dotenv
-    load_dotenv()
     ids_str = os.getenv("ALLOWED_USER_IDS", "")
-    if ids_str:
-        return {int(x.strip()) for x in ids_str.split(",") if x.strip()}
-    # In development, allow all users for testing
-    # In production, this should be set explicitly
-    return set()
+    return {int(x.strip()) for x in ids_str.split(",") if x.strip()}
 
 def load_allowed_usernames() -> set:
     """Load allowed Telegram usernames from environment (without @)."""
-    import os
-    from dotenv import load_dotenv
-    load_dotenv()
     usernames_str = os.getenv("ALLOWED_USERNAMES", "")
-    if usernames_str:
-        return {x.strip().lower() for x in usernames_str.split(",") if x.strip()}
-    return set()
+    return {x.strip().lower() for x in usernames_str.split(",") if x.strip()}
 
 ALLOWED_USER_IDS = load_allowed_user_ids()
 ALLOWED_USERNAMES = load_allowed_usernames()
@@ -60,14 +51,17 @@ ALLOWED_USERNAMES = load_allowed_usernames()
 
 def is_authorized(telegram_user_id: int, username: Optional[str] = None) -> bool:
     """Check if user is in the allowlist.
-    
+
     Checks both numeric user ID and username.
-    username should be the raw username string (without @) or None.
+    Empty allowlists deny everyone (safe default per spec).
     """
     if telegram_user_id in ALLOWED_USER_IDS:
         return True
     if username and username.lower() in ALLOWED_USERNAMES:
         return True
+    logger.warning(
+        "ACCESS DENIED: user_id=%s username=%s", telegram_user_id, username
+    )
     return False
 
 
