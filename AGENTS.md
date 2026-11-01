@@ -102,14 +102,32 @@ OpenRouter economic model integration for automatic category classification.
 - Test end-to-end with actual bot token
 - Phase 3 (Renda, benefícios e custos fixos) depends on Phase 2 completion
 
-### Phase 3 — Renda, benefícios e custos fixos (pending)
-- Salary/benefit profiles
-- Recurring expenses module
-- Budget projection
+### Phase 3 — Renda, benefícios e custos fixos 🔨 IN PROGRESS
+- Salary/benefit profiles implemented with deterministic Python calculations
+- Recurring expenses module with occurrence tracking
+- Budget projection with /orcamento command
+- Benefits by workday calculation (VR/VA)
+- Calendar with holidays configuration
+- Receivables module ("me deve") - planned for Phase 4
+
+**Completed:**
+- Benefit service (benefit_service.py): calculate_benefit_by_day() and calculate_irrrf()
+- Recurring expense service (recurring_expense_service.py): create_recurring_expense(), get_user_recurring_expenses(), calculate_budget_projection()
+- Phase 3 schema SQL (docs/0007_phase3_schema.sql): benefit_rules, recurring_expenses, recurring_expense_occurrences, receivables, receivable_payments tables
+- Hardcoded INSS/IRRF tables in Python (versionadas por vigência)
+- Keyword mapping and category resolution continues from Phase 2
+
+**Remaining:**
+- End-to-end testing with actual bot token
+- /fixos command implementation
+- /receber command implementation  
+- /orcamento command with full budget projection
+- User interface for benefit configuration and recurring expense management
+- Calendar/holiday configuration UI
 
 ### Phase 4 — Contas a receber e orçamento projected (pending)
-- Receivables module ("me doit")
-- Budget calculation with available vs projected
+- Receivables module ("me doit") - planned after Phase 3 core is stable
+- Budget calculation refinements with received amounts
 
 ### Phase 5 — Análises e relatório HTML (pending)
 - /relatorio command
@@ -119,7 +137,6 @@ OpenRouter economic model integration for automatic category classification.
 ### Phase 6 — Monitoramento de IA (pending)
 - Token/cost tracking (already implemented in AI Usage Service)
 - Monthly limits and alerts
-- /ia_status and /ia_limite commands
 
 ### Phase 7 — Importação CSV (pending)
 - CSV file upload via Telegram
