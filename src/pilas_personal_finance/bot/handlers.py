@@ -599,7 +599,10 @@ async def registrar_recebimento_command(update: Update, context: ContextTypes.DE
 async def orcamento_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /orcamento command.
     
-    Show budget projection for the current month.
+    Show budget projection for the current month with three perspectives:
+    - Disponível agora (confirmed)
+    - Disponível projetado (expected revenues + commitments)
+    - Cenário incluindo recebíveis (identified as uncertain)
     """
     user = update.effective_user
     telegram_user_id = user.id
@@ -615,7 +618,9 @@ async def orcamento_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Get current month
     from datetime import datetime
-    current_month = datetime.utcnow().strftime("%Y-%m")
+    import pytz
+    tz = pytz.timezone("America/Sao_Paulo")
+    current_month = datetime.now(tz).strftime("%Y-%m")
     
     # Calculate budget projection
     projection = calculate_budget_projection(supabase, telegram_user_id, current_month)
@@ -640,28 +645,54 @@ async def orcamento_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_expenses = sum(t.get("amount", 0) for t in expenses)
     total_incomes = sum(t.get("amount", 0) for t in incomes)
     
-    # Fixed costs pending
+    # Fixed costs pending (not paid)
     fixed_pending = sum(r.get("expected_amount", 0) for r in recurring if r.get('is_active') and r.get('status') != 'PAID')
     
-    # Build the message
+    # Available NOW = income received - expenses realized
+    # Based on confirmed values only (not expected/received)
+    available_now = total_incomes - total_expenses
+    if available_now < 0:
+        available_now = 0
+    
+    # Available PROJECTED = available now + expected benefits - fixed pending
+    # Includes expected revenues and future commitments, but NOT open receivables as confirmed money
+    available_projected = available_now - fixed_pending + projection['available_projected'] - projection['available_now']
+    
+    # Receivables pending (shown separately, NOT added to confirmed values)
+    receiveables_pending = projection.get('receiveables_pending', 0)
+    
+    # Build the message with three perspectives per spec
     text = f"📊 **Orçamento de {current_month}**\n\n"
     
-    text += f"💰 **Receitas recebidas:** R$ {total_incomes:.2f}\n"
-    text += f"💸 **Despesas realizadas:** R$ {total_expenses:.2f}\n"
-    text += f"🔒 **Custos fixos pendentes:** R$ {fixed_pending:.2f}\n\n"
+    # Line 1: Disponível agora
+    text += f"🟢 **Disponível agora:** R$ {available_now:.2f}\n"
+    text += f"   * baseado em valores efetivamente recebidos e gastos confirmados\n\n"
     
-    text += f"📱 **Disponível agora:** R$ {projection['available_now']:.2f}\n"
-    text += f"📈 **Disponível projetado:** R$ {projection['available_projected']:.2f}\n\n"
+    # Line 2: Disponível projetado
+    text += f"🟡 **Disponível projetado até o fim do mês:** R$ {available_projected:.2f}\n"
+    text += f"   * inclui receitas esperadas e compromissos futuros\n\n"
     
+    # Line 3: Cenário incluindo recebíveis (opcional, identificado como incerto)
+    text += f"🔵 **Cenário incluindo recebíveis:** R$ {available_projected + receiveables_pending:.2f}\n"
+    text += f"   * identificado como incerto, NÃO somado ao disponível confirmado\n\n"
+    
+    # Summary section
     text += f"📊 **Resumo:**\n"
-    text += f"   • Total gasto: R$ {total_expenses:.2f}\n"
-    text += f"   • Total recebido: R$ {total_incomes:.2f}\n"
+    text += f"   • Total de receitas recebidas: R$ {total_incomes:.2f}\n"
+    text += f"   • Total de despesas realizadas: R$ {total_expenses:.2f}\n"
     text += f"   • Custos fixos pendentes: R$ {fixed_pending:.2f}\n"
-    text += f"   • Livre para gastos: R$ {projection['available_projected']:.2f}\n\n"
+    text += f"   • Livre para gastos: R$ {available_projected:.2f}\n\n"
     
-    if projection['receiveables_pending'] > 0:
-        text += f"⚠️ **Contas a receber (pendentes):** R$ {projection['receiveables_pending']:.2f}\n"
-        text += f"   *Não somado ao disponível confirmado*\n\n"
+    # Receivables note
+    if receiveables_pending > 0:
+        text += f"⚠️ **Contas a receber (pendentes):** R$ {receiveables_pending:.2f}\n"
+        text += f"   *Não somado ao disponível confirmado* (identificado como incerto)\n\n"
+    
+    # Key recommendations
+    text += f"💡 **Recomendações:**\n"
+    text += f"   • Gastos livres: R$ {max(0, available_projected):.2f}\n"
+    text += f"   • Cuidado ao considerar recebíveis como dinheiro disponível\n"
+    text += f"   • Orçamento projetado considera compromissos futuros\n\n"
     
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
