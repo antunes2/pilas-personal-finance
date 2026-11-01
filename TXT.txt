@@ -1,2 +1,0 @@
-p1l4smeajuda <- senha supabase
-sb_publishable_6IQSmacfz7cgvk7nW14kQQ_FriZCJxP <- api supabase
