@@ -4,11 +4,13 @@ Contains /start, /ajuda, /adicionar, /fixos, /orcamento, /receber and natural me
 """
 
 import re
+import os
 from datetime import datetime
 from typing import Optional, List
 import pytz
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ContextTypes, MessageHandler, filters, CommandHandler
+from supabase import create_client
 
 from pilas_personal_finance.services.transaction_service import TransactionService
 from pilas_personal_finance.services.benefit_service import calculate_benefit_by_day, calculate_irrrf
@@ -19,6 +21,12 @@ from pilas_personal_finance.services.recurring_expense_service import (
     calculate_budget_projection,
 )
 from pilas_personal_finance.repositories import AppUsersRepo
+
+
+def get_supabase():
+    """Create and return a fresh Supabase client from environment variables."""
+    from supabase import create_client as _cc
+    return _cc(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SECRET_KEY"))
 
 
 # --- Allowlist ---
@@ -134,7 +142,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    from main import get_supabase
+
     supabase = get_supabase()
     service = TransactionService(supabase)
 
@@ -201,7 +209,7 @@ async def adicionar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text.replace("/adicionar", "").strip()
         if text:
             # Try to parse as natural language
-            from main import get_supabase
+
             supabase = get_supabase()
             service = TransactionService(supabase)
             tx = service.register_message(telegram_user_id, text, update.message.message_id)
@@ -242,28 +250,35 @@ async def fixos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Acesso negado.")
         return
 
-    from main import get_supabase
+    # Dispatch subcommands: "/fixos adicionar ..." or "/fixos pagos"
+    args = context.args or []
+    if args and args[0].lower() in ("adicionar", "add"):
+        await fixos_adicionar_command(update, context)
+        return
+    if args and args[0].lower() in ("pagos", "paid"):
+        await fixos_pagos_command(update, context)
+        return
+
     supabase = get_supabase()
-    service = TransactionService(supabase)
 
     # Get user's recurring expenses
     recurring = get_user_recurring_expenses(supabase, telegram_user_id)
-    
+
     if not recurring:
         await update.message.reply_text(
             "Não há despesas recorrentes cadastradas.\n"
-            "Use `/fixos adicionar` para cadastrar uma nova.",
+            "Use /fixos adicionar para cadastrar uma nova. Ex: /fixos adicionar Aluguel 1500 mensal 5",
             reply_markup=get_main_keyboard()
         )
         return
-    
+
     # Format the list
     text = "📋 **Despesas Recorrentes Cadastradas**\n\n"
     for i, exp in enumerate(recurring, 1):
-        text += f"{i}. {exp['description']} - R$ {exp['expected_amount']:.2f} ({{exp['frequency']}}) - {exp['scope']}\n"
-    
-    text += "\nUse /fixos adicionar para cadastrar uma nova recorrência."
-    
+        text += f"{i}. {exp['description']} - R$ {float(exp['expected_amount']):.2f} ({exp.get('frequency', 'mensal')}) - {exp.get('scope', 'PERSONAL')}\n"
+
+    text += "\nUse /fixos adicionar para cadastrar uma nova recorrência.\nUse /pagar para marcar o pagamento."
+
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 
@@ -282,37 +297,61 @@ async def fixos_adicionar_command(update: Update, context: ContextTypes.DEFAULT_
 
     # Check if text after command
     if update.message and update.message.text:
-        text = update.message.text.replace("/fixos adicionar", "").strip()
+        text = update.message.text.replace("/fixos_adicionar", "").replace("/fixos adicionar", "").strip()
         if text:
-            # Parse the text to extract recurring expense details
-            # Format expected: "descricao valor frequencia dia"
-            # ou mensagem natural que será processada
-            
-            from main import get_supabase
+            # Format expected: "descricao valor frequencia [dia]" or natural msg
+            # Ex: "/fixos adicionar Aluguel 1500 mensal 5"
             supabase = get_supabase()
-            service = TransactionService(supabase)
-            
-            # Try to parse as a natural language recurring expense
-            # For now, we'll ask for structured data
-            await update.message.reply_text(
-                "Para cadastrar uma despesa recorrente, forneça os detalhes:\n\n"
-                "1. Descrição (ex: 'Aluguel', 'Internet', 'Academia')\n"
-                "2. Valor esperado (ex: '1500')\n"
-                "3. Frequência (mensal, semanal, anual)\n"
-                "4. Dia de vencimento (opcional, 1-31)\n\n"
-                "Exemplo: `Aluguel 1500 mensal 5`\n\n"
-                "Ou use o formato natural e eu tentarei processar.",
-                reply_markup=get_main_keyboard()
+
+            m = re.match(
+                r"^(?P<desc>.+?)\s+(?P<value>\d+[.,]?\d*)\s*"
+                r"(?P<freq>mensal|semanal|anual)?\s*(?P<day>\d{1,2})?$",
+                text.strip(),
+                re.IGNORECASE,
             )
+            if not m:
+                await update.message.reply_text(
+                    "Formato: `/fixos adicionar Descrição valor [mensal|semanal|anual] [dia]`\n"
+                    "Ex: `/fixos adicionar Aluguel 1500 mensal 5`",
+                    parse_mode="Markdown",
+                )
+                return
+
+            description = m.group("desc").strip()
+            value = float(m.group("value").replace(",", "."))
+            freq = (m.group("freq") or "mensal").lower()
+            day = int(m.group("day")) if m.group("day") else None
+
+            # Resolve authenticated user id
+            user_repo = AppUsersRepo(supabase)
+            user = user_repo.find_by_telegram_id(telegram_user_id)
+            if not user:
+                await update.message.reply_text("Usuário não encontrado. Use /start primeiro.")
+                return
+
+            try:
+                rec = create_recurring_expense(
+                    supabase, user["id"], description, None,
+                    value, freq, due_day=day,
+                )
+                await update.message.reply_text(
+                    f"✅ Despesa fixa cadastrada: {rec['description']} - "
+                    f"R$ {float(rec['expected_amount']):.2f} ({rec['frequency']}"
+                    + (f", vence dia {day})" if day else ")")
+                )
+            except Exception as e:
+                await update.message.reply_text(f"Erro ao cadastrar: {str(e)[:200]}")
         else:
             await update.message.reply_text(
-                "Use `/fixos adicionar` followed by the details,\n"
-                "ex: `/fixos adicionar Aluguel 1500 mensal 5`"
+                "Use: `/fixos adicionar Descrição valor [mensal|semanal|anual] [dia]`\n"
+                "Ex: `/fixos adicionar Aluguel 1500 mensal 5`",
+                parse_mode="Markdown",
             )
     else:
         await update.message.reply_text(
-            "Use `/fixos adicionar` followed by the details,\n"
-            "ex: `/fixos adicionar Aluguel 1500 mensal 5`"
+            "Use: `/fixos adicionar Descrição valor [mensal|semanal|anual] [dia]`\n"
+            "Ex: `/fixos adicionar Aluguel 1500 mensal 5`",
+            parse_mode="Markdown",
         )
 
 
@@ -326,7 +365,7 @@ async def fixos_pagos_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Acesso negado.")
         return
 
-    from main import get_supabase
+
     supabase = get_supabase()
     service = TransactionService(supabase)
     
@@ -372,7 +411,7 @@ async def pagar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Acesso negado.")
         return
 
-    from main import get_supabase
+
     supabase = get_supabase()
     service = TransactionService(supabase)
     
@@ -411,7 +450,7 @@ async def receber_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Acesso negado.")
         return
 
-    from main import get_supabase
+
     supabase = get_supabase()
     service = TransactionService(supabase)
     
@@ -488,7 +527,7 @@ async def list_receivables_command(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("Acesso negado.")
         return
 
-    from main import get_supabase
+
     supabase = get_supabase()
     service = TransactionService(supabase)
     
@@ -525,7 +564,7 @@ async def registrar_recebimento_command(update: Update, context: ContextTypes.DE
         await update.message.reply_text("Acesso negado.")
         return
 
-    from main import get_supabase
+
     supabase = get_supabase()
     service = TransactionService(supabase)
     
@@ -612,7 +651,7 @@ async def orcamento_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Acesso negado.")
         return
 
-    from main import get_supabase
+
     supabase = get_supabase()
     service = TransactionService(supabase)
     
@@ -719,17 +758,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Parse and register the transaction
-    from main import get_supabase
+
     supabase = get_supabase()
     service = TransactionService(supabase)
+
+    # Income messages ("Recebi 6500 de salário") get a dedicated path
+    if service.is_income_message(message_text):
+        tx = service.register_income_message(
+            telegram_user_id, message_text, update.message.message_id
+        )
+        if tx:
+            await update.message.reply_text(
+                f"💰 Entrada registrada: R$ {tx['amount']:.2f} - {tx['description']}"
+            )
+        else:
+            await update.message.reply_text(
+                "Não consegui entender essa entrada. Use: `Recebi 6500 de salário`",
+                parse_mode="Markdown",
+            )
+        return
 
     tx = service.register_message(telegram_user_id, message_text, update.message.message_id)
 
     if tx:
-        await update.message.reply_text(
-            f"Registrado: R$ {tx['amount']:.2f} - {tx['description']} "
-            f"({tx['payment_instrument']['name']}) - Categoria: {tx['category']['name']}"
+        # Fetch related names for a friendly confirmation
+        cat_name = ""
+        if tx.get("category_id"):
+            cat_r = supabase.from_("categories").select("name").eq("id", tx["category_id"]).execute()
+            if cat_r.data:
+                cat_name = cat_r.data[0]["name"]
+        inst_name = ""
+        if tx.get("payment_instrument_id"):
+            inst_r = supabase.from_("payment_instruments").select("name").eq(
+                "id", tx["payment_instrument_id"]).execute()
+            if inst_r.data:
+                inst_name = inst_r.data[0]["name"]
+        reply = f"Registrado: R$ {tx['amount']:.2f} - {tx['description']}"
+        if inst_name:
+            reply += f" ({inst_name})"
+        if cat_name:
+            reply += f" - Categoria: {cat_name}"
+
+        # Recurring auto-match feedback
+        from pilas_personal_finance.services.recurring_expense_service import find_pending_occurrence
+        occ = find_pending_occurrence(
+            supabase, tx['user_id'], tx.get('description', ''), float(tx['amount'])
         )
+        if occ:
+            reply += "\n✅ Despesa fixa: ocorrência marcada como paga."
+        await update.message.reply_text(reply)
     else:
         # Ask for clarification
         await update.message.reply_text(

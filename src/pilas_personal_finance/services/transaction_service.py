@@ -14,6 +14,9 @@ from supabase import Client
 
 from pilas_personal_finance.services.ai_service import AIService
 from pilas_personal_finance.services.ai_usage_service import AIUsageService
+from pilas_personal_finance.services.recurring_expense_service import (
+    auto_mark_recurring_payment,
+)
 
 
 def _normalize_accentless(text: str) -> str:
@@ -53,6 +56,28 @@ HARDCODED_CATEGORIES_INCOME = [
 ]
 
 # Map description keywords to hardcoded category names
+# Income trigger words - messages containing these register as INCOME
+INCOME_TRIGGER_WORDS = {
+    "recebi", "recebemos", "ganhei", "ganhamos", "reembolso", "restituicao",
+    "bonus", "decimo terceiro", "13º", "13o", "13o", "freela", "pix recebido",
+}
+
+# Map income keywords to hardcoded income categories
+INCOME_KEYWORD_MAP = {
+    "salario": "Salario",
+    "salário": "Salario",
+    "vencimento": "Salario",
+    "pagamento": "Salario",
+    "beneficio": "Beneficio",
+    "benefício": "Beneficio",
+    "vr ": "Beneficio",
+    "va ": "Beneficio",
+    "vale": "Beneficio",
+    "reembolso": "Reembolso",
+    "restituicao": "Reembolso",
+    "restituição": "Reembolso",
+}
+
 CATEGORY_KEYWORD_MAP = {
     # Expense categories
     "alimentacao": "Alimentacao",
@@ -116,6 +141,7 @@ class TransactionService:
         from pilas_personal_finance.repositories import (
             AppUsersRepo, CategoriesRepo, PaymentInstrumentsRepo, TransactionsRepo
         )
+        self.supabase = supabase
         self.users_repo = AppUsersRepo(supabase)
         self.categories_repo = CategoriesRepo(supabase)
         self.instruments_repo = PaymentInstrumentsRepo(supabase)
@@ -185,6 +211,91 @@ class TransactionService:
             ai_category_confidence=category.get("ai_category_confidence"),
         )
 
+        # 7. Auto-detect recurring expense: if this payment closes a pending
+        # occurrence (description + amount match), mark it as paid
+        self._maybe_mark_recurring_as_paid(tx, user["id"])
+
+        return tx
+
+    def _maybe_mark_recurring_as_paid(self, tx: Dict[str, Any],
+                                      user_id: str) -> None:
+        """Auto-detects if the registered expense closes a pending recurring occurrence.
+
+        Deterministic matching (description + amount, no AI). Never fails.
+        """
+        try:
+            auto_mark_recurring_payment(
+                self.supabase, user_id,
+                tx.get("description", ""),
+                float(tx.get("amount", 0)),
+                tx["id"],
+            )
+        except Exception as e:
+            logger.warning(f"Recurring auto-match failed for {tx.get('id')}: {e}")
+
+    def is_income_message(self, message: str) -> bool:
+        """True if the message looks like income (recebi/ganhei/salário...)."""
+        norm = _normalize_accentless(message)
+        return any(trigger in norm for trigger in INCOME_TRIGGER_WORDS)
+
+    def register_income_message(self, telegram_user_id: int, message: str,
+                                telegram_update_id: int) -> Optional[Dict[str, Any]]:
+        """Register an INCOME from a natural message.
+
+        Formats: "Recebi 6500 de salário", "Salário 6500", "Ganhei 300 de freela".
+        Category resolved deterministically via INCOME_KEYWORD_MAP.
+        """
+        # Extract the first number in the message (handles value mid-sentence)
+        match = re.search(r"(\d+[.,]?\d*)", message.replace("R$", "").replace("$", ""))
+        if not match:
+            return None
+        try:
+            value = float(match.group(1).replace(",", "."))
+        except ValueError:
+            return None
+        if value <= 0:
+            return None
+
+        # Build description: message minus trigger words, value and stopwords
+        description = re.sub(r"(\d+[.,]?\d*)", "", message).strip()
+        for trigger in (r"\brecebi\b", r"\brecebemos\b", r"\bganhei\b", r"\bganhamos\b"):
+            description = re.sub(trigger, "", description, flags=re.IGNORECASE)
+        description = re.sub(r"^\s*(que\s+|de\s+|do\s+|da\s+|dos\s+|das\s+)+", "",
+                             description, flags=re.IGNORECASE).strip(" ,.-")
+        if not description:
+            description = "Entrada"
+
+        # 1. Find or create user
+        user = self.users_repo.find_by_telegram_id(telegram_user_id)
+        if not user:
+            user = self.users_repo.create(telegram_user_id, display_name=f"User {telegram_user_id}")
+
+        # 2. Resolve income category (deterministic keyword fallback)
+        norm_desc = _normalize_accentless(description)
+        category_name = "Outras Entradas"
+        for keyword, cat in INCOME_KEYWORD_MAP.items():
+            if _normalize_accentless(keyword) in norm_desc:
+                category_name = cat
+                break
+
+        # 3. Create INCOME transaction
+        tx_date = self._parse_date(message)
+        tx = self.transactions_repo.create(
+            user_id=uuid.UUID(user["id"]),
+            category_id=self._resolve_category_db_id(
+                {"id": category_name, "name": category_name, "transaction_type": "INCOME"}
+            ) if category_name else None,
+            payment_instrument_id=None,
+            tx_type="INCOME",
+            scope="PERSONAL",
+            amount=value,
+            description=description,
+            transaction_date=tx_date,
+            competence_month=None,
+            source="TELEGRAM",
+            telegram_update_id=telegram_update_id,
+            ai_category_confidence=None,
+        )
         return tx
 
     def _determine_category_with_ai(self, description: str,
@@ -251,7 +362,7 @@ class TransactionService:
 
         # Name-based id - look up the real category in Supabase
         db_category = self.categories_repo.find_by_name(
-            category.get("name", ""), "EXPENSE"
+            category.get("name", ""), category.get("transaction_type", "EXPENSE")
         )
         if db_category and db_category.get("id"):
             return uuid.UUID(db_category["id"])

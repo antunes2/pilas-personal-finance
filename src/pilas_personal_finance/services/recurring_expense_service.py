@@ -73,25 +73,24 @@ def get_upcoming_occurrences(
     month: str,
 ) -> List[Dict[str, Any]]:
     """Lista ocorrências de despesas recorrentes para um mês específico.
-    
+
     month format: YYYY-MM
     """
-    from_date = f"{month}-01"
-    # Calculate last day of month
     import calendar
-    month_days = calendar.monthrange(int(month[:4]), int(month[5:7]))[1]
-    to_date = f"{month}-{month_days:02d}"
-    
-    query = supabase.from_("recurring_expense_occurrences").select(
-        "*", count="exact"
-    ).eq("recurring_expense_id", user_id)  # This is wrong, need proper filter
-    
-    # Actually filter by period_month range
-    query = supabase.from_("recurring_expense_occurrences").select("*").gt(
-        "period_month", f"{month}-01"
-    ).lt("period_month", f"{month}-31")
-    
-    result = query.execute()
+    year = int(month[:4])
+    mon = int(month[5:7])
+    from_date = f"{month}-01"
+    to_date = f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
+
+    # Occurrences table has no user_id - filter through the parent expense
+    recurring = get_user_recurring_expenses(supabase, user_id, active_only=False)
+    ids = [r["id"] for r in recurring]
+    if not ids:
+        return []
+
+    result = supabase.from_("recurring_expense_occurrences").select("*").in_(
+        "recurring_expense_id", ids
+    ).gte("period_month", from_date).lte("period_month", to_date).execute()
     return result.data or []
 
 
@@ -99,17 +98,106 @@ def mark_occurrence_as_paid(
     supabase: Client,
     occurrence_id: str,
     transaction_id: Optional[str] = None,
+    actual_amount: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Marca uma ocorrência como paga e retorna os dados atualizados."""
-    result = supabase.from_("recurring_expense_occurrences").update({
-        "status": "PAID",
-        "actual_amount": None,  # Will be set separately
-        "due_date": datetime.utcnow().isoformat(),
-    }).eq("id", occurrence_id).execute()
-    
+    updates = {"status": "PAID"}
+    if transaction_id is not None:
+        updates["transaction_id"] = transaction_id
+    if actual_amount is not None:
+        updates["actual_amount"] = actual_amount
+
+    result = supabase.from_("recurring_expense_occurrences").update(
+        updates
+    ).eq("id", occurrence_id).execute()
+
     if result.data and len(result.data) > 0:
         return result.data[0]
     raise Exception("Failed to mark occurrence as paid")
+
+
+def _normalize_desc(text: str) -> str:
+    """Lowercase + strip accents for description matching."""
+    import unicodedata
+    return unicodedata.normalize("NFKD", text.lower()).encode(
+        "ascii", "ignore"
+    ).decode("ascii").strip()
+
+
+def find_pending_occurrence(
+    supabase: Client,
+    user_id: str,
+    description: str,
+    amount: float,
+) -> Optional[Dict[str, Any]]:
+    """Busca uma ocorrência pendente do mês que corresponde ao gasto registrado.
+
+    Deterministic matching (no AI):
+    - month = current period (or previous month, to absorb payments made shortly after the due month)
+    - description must overlap (containment or shared word)
+    - amount must match the expected amount within 0.01
+    Returns None when nothing matches safely.
+    """
+    from datetime import date
+    today = date.today()
+    candidates: Dict[str, Any] = {}
+    for offset in (0, -1):
+        d = date(today.year, today.month, 1)
+        year = d.year + (offset // 12) if offset else d.year
+        mon = d.month + offset if offset else d.month
+        if mon < 1:
+            mon += 12
+            year -= 1
+        m = f"{year:04d}-{mon:02d}"
+        for occ in get_upcoming_occurrences(supabase, user_id, m):
+            if occ.get("status") not in ("PAID", "CANCELLED"):
+                candidates[occ["id"]] = occ
+    if not candidates:
+        return None
+
+    desc_norm = _normalize_desc(description)
+    desc_words = set(w for w in desc_norm.split() if len(w) >= 4)
+
+    for occ in candidates.values():
+        expected = float(occ.get("expected_amount") or 0)
+        if abs(expected - amount) > 0.01:
+            continue
+        occ_desc = _normalize_desc(occ.get("description") or "")
+        if occ_desc and (occ_desc in desc_norm or desc_norm in occ_desc):
+            return occ
+        occ_words = set(w for w in occ_desc.split() if len(w) >= 4)
+        if occ_words and occ_words.issubset(desc_words):
+            return occ
+
+    return None
+
+
+def auto_mark_recurring_payment(
+    supabase: Client,
+    user_id: str,
+    description: str,
+    amount: float,
+    transaction_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Detecta se um gasto registrado corresponde a uma recorrência pendente.
+
+    Se sim, marca a ocorrência como paga associando à transação
+    (impede dupla contagem no orçamento: gasto pago remove o pendente).
+    Returns the updated occurrence or None.
+    """
+    occ = find_pending_occurrence(supabase, user_id, description, amount)
+    if not occ:
+        return None
+    try:
+        return mark_occurrence_as_paid(
+            supabase, occ["id"],
+            transaction_id=transaction_id,
+            actual_amount=amount,
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"auto_mark_recurring_payment failed: {e}")
+        return None
 
 
 def calculate_budget_projection(

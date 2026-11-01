@@ -82,3 +82,6 @@ CREATE INDEX IF NOT EXISTS idx_receivables_creditor ON receivables(creditor_user
 CREATE INDEX IF NOT EXISTS idx_receivables_debtor ON receivables(debtor_name);
 CREATE INDEX IF NOT EXISTS idx_receivables_status ON receivables(status);
 CREATE INDEX IF NOT EXISTS idx_receivable_payments_receivable_id ON receivable_payments(receivable_id);
+-- Grant privileges to service_role (bot uses service_role key)
+GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
