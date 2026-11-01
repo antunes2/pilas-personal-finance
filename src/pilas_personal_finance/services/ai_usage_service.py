@@ -27,7 +27,7 @@ class AIUsageService:
             os.getenv("SUPABASE_SECRET_KEY")
         )
         self.provider = "openrouter"
-        self.model = os.getenv("AI_DEFAULT_MODEL", "anthropic/claude-3.5-sonnet")
+        self.model = os.getenv("AI_DEFAULT_MODEL", "google/gemini-2.5-flash")
 
     def record_usage(
         self,

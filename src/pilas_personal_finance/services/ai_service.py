@@ -6,6 +6,7 @@ AI receives ONLY the description and list of valid categories - no financial dat
 
 import os
 import json
+import re
 import logging
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
@@ -53,7 +54,7 @@ class AIService:
 
     def __init__(self):
         self.api_key = os.getenv("OPENROUTER_API_KEY")
-        self.default_model = os.getenv("AI_DEFAULT_MODEL", "anthropic/claude-3.5-sonnet")
+        self.default_model = os.getenv("AI_DEFAULT_MODEL", "google/gemini-2.5-flash")
 
         if not self.api_key:
             logger.warning("OPENROUTER_API_KEY not set - AI classification disabled")
@@ -145,9 +146,13 @@ class AIService:
             result = response.json()
             message_content = result["choices"][0]["message"]["content"]
 
-            # Parse the JSON response from AI
+            # Parse the JSON response from AI (strip markdown fences if present)
             try:
-                classification = json.loads(message_content)
+                raw_content = message_content.strip()
+                if raw_content.startswith("```"):
+                    raw_content = re.sub(r"^```[a-zA-Z]*\s*", "", raw_content)
+                    raw_content = re.sub(r"\s*```$", "", raw_content)
+                classification = json.loads(raw_content.strip())
                 # Validate required fields
                 if "categoria" not in classification or "confiança" not in classification:
                     logger.error(f"AI response missing required fields: {classification}")

@@ -1,8 +1,10 @@
 -- Phase 1: Banco e registros básicos - Schema Migration
 -- Run this in Supabase SQL Editor
+-- Note: gen_random_uuid() is built into PostgreSQL 13+, no extension needed.
 
--- Enable UUID extension
-CREATE EXTENSION IF NOT EXISTS uuid;
+-- Grant privileges to service_role (bot uses service_role key)
+GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
 
 -- app_users: Two authorized Telegram users
 CREATE TABLE IF NOT EXISTS app_users (

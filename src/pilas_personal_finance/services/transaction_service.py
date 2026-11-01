@@ -6,6 +6,7 @@ Keep these free of Telegram-specific code where possible.
 
 import uuid
 import logging
+import unicodedata
 from typing import Optional, List, Dict, Any
 import re
 from datetime import datetime
@@ -13,6 +14,17 @@ from supabase import Client
 
 from pilas_personal_finance.services.ai_service import AIService
 from pilas_personal_finance.services.ai_usage_service import AIUsageService
+
+
+def _normalize_accentless(text: str) -> str:
+    """Lowercase and strip accents so keyword matching works with or without them.
+
+    'almoco' and 'almoço' both normalize to 'almoco'.
+    """
+    return unicodedata.normalize(
+        "NFKD", text.lower().strip()
+    ).encode("ascii", "ignore").decode("ascii")
+
 
 # Hardcoded category list - the 16 categories defined in the spec
 # These are the authoritative categories, independent of Supabase data format
@@ -45,6 +57,8 @@ CATEGORY_KEYWORD_MAP = {
     # Expense categories
     "alimentacao": "Alimentacao",
     "comida": "Alimentacao",
+    "mercado": "Alimentacao",
+    "supermercado": "Alimentacao",
     "lanche": "Alimentacao",
     "restaurante": "Alimentacao",
     "cafe": "Alimentacao",
@@ -157,7 +171,7 @@ class TransactionService:
         # 6. Create the transaction
         tx = self.transactions_repo.create(
             user_id=uuid.UUID(user["id"]),
-            category_id=uuid.UUID(category["id"]) if category.get("id") else None,
+            category_id=self._resolve_category_db_id(category),
             payment_instrument_id=uuid.UUID(instrument["id"]) if instrument.get("id") else None,
             tx_type="EXPENSE",
             scope="PERSONAL",
@@ -228,6 +242,29 @@ class TransactionService:
         category = self._resolve_category_hardcoded(description, hardcoded_expense_categories)
         return category, None
 
+    def _resolve_category_db_id(self, category: Optional[Dict[str, Any]]) -> Optional[uuid.UUID]:
+        """Resolve a hardcoded category (name-as-id) to its real Supabase UUID.
+
+        Returns None if the category is None or cannot be found in the database.
+        """
+        if not category:
+            return None
+
+        # Already a valid UUID (real DB row)
+        try:
+            return uuid.UUID(str(category["id"]))
+        except (KeyError, ValueError, TypeError):
+            pass
+
+        # Name-based id - look up the real category in Supabase
+        db_category = self.categories_repo.find_by_name(
+            category.get("name", ""), "EXPENSE"
+        )
+        if db_category and db_category.get("id"):
+            return uuid.UUID(db_category["id"])
+
+        return None
+
     def _find_category_by_name(self, categories: List[str], name: str) -> Optional[Dict[str, Any]]:
         """Find a category by name in the list and return a dict."""
         name_lower = name.lower()
@@ -242,11 +279,11 @@ class TransactionService:
 
         Uses the authoritative hardcoded category list, independent of Supabase data format.
         """
-        desc_lower = description.lower()
+        desc_lower = _normalize_accentless(description)
 
         # Search for keywords in description using the map
         for keyword, category_name in CATEGORY_KEYWORD_MAP.items():
-            if keyword in desc_lower:
+            if _normalize_accentless(keyword) in desc_lower:
                 # Verify the category is in the hardcoded list
                 if category_name in hardcoded_expense_categories:
                     return {"id": category_name, "name": category_name, "transaction_type": "EXPENSE"}
@@ -291,7 +328,7 @@ class TransactionService:
         # Create transaction
         tx = self.transactions_repo.create(
             user_id=uuid.UUID(user["id"]),
-            category_id=uuid.UUID(category["id"]) if category.get("id") else None,
+            category_id=self._resolve_category_db_id(category),
             payment_instrument_id=uuid.UUID(instrument["id"]) if instrument.get("id") else None,
             tx_type="EXPENSE",
             scope="PERSONAL",
