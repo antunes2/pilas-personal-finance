@@ -27,7 +27,13 @@ def create_recurring_expense(
     is_active: bool = True,
 ) -> Dict[str, Any]:
     """Cria uma nova despesa recorrente."""
-    
+
+    # Map PT frequency terms to the schema's CHECK constraint values
+    freq_map = {"mensal": "monthly", "semanal": "weekly", "anual": "annual"}
+    frequency = freq_map.get(frequency.lower(), frequency.lower())
+    if frequency not in ("weekly", "monthly", "annual", "personalized"):
+        frequency = "personalized"
+
     data = {
         "owner_user_id": owner_user_id,
         "description": description,
@@ -43,8 +49,7 @@ def create_recurring_expense(
         data["due_day"] = due_day
     if payment_instrument_id is not None:
         data["payment_instrument_id"] = payment_instrument_id
-    if start_date is not None:
-        data["start_date"] = start_date
+    data["start_date"] = start_date or datetime.utcnow().date().isoformat()
     if end_date is not None:
         data["end_date"] = end_date
     
@@ -140,6 +145,9 @@ def find_pending_occurrence(
     """
     from datetime import date
     today = date.today()
+    # Parent descriptions live in recurring_expenses (occurrences have none)
+    parents = {r["id"]: r.get("description", "") for r in
+               get_user_recurring_expenses(supabase, user_id, active_only=False)}
     candidates: Dict[str, Any] = {}
     for offset in (0, -1):
         d = date(today.year, today.month, 1)
@@ -162,7 +170,7 @@ def find_pending_occurrence(
         expected = float(occ.get("expected_amount") or 0)
         if abs(expected - amount) > 0.01:
             continue
-        occ_desc = _normalize_desc(occ.get("description") or "")
+        occ_desc = _normalize_desc(parents.get(occ.get("recurring_expense_id"), ""))
         if occ_desc and (occ_desc in desc_norm or desc_norm in occ_desc):
             return occ
         occ_words = set(w for w in occ_desc.split() if len(w) >= 4)
