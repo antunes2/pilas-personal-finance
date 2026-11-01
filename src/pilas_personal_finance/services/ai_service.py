@@ -130,6 +130,7 @@ class AIService:
                     }
                 ],
                 "temperature": 0.0,  # Deterministic - don't get creative
+                "usage": {"include": True},  # Ask OpenRouter to report real token usage/cost
             }
 
             response = httpx.post(
@@ -177,6 +178,10 @@ class AIService:
                     "category_id": category_id,
                     "confidence": round(confidence, 2),
                     "justificativa": classification.get("justificativa", "")[:200],  # Truncate if too long
+                    "input_tokens": result.get("usage", {}).get("prompt_tokens", 0),
+                    "output_tokens": result.get("usage", {}).get("completion_tokens", 0),
+                    "cost_usd": result.get("usage", {}).get("cost"),
+                    "request_id": result.get("id"),
                 }
 
             except json.JSONDecodeError as e:

@@ -35,6 +35,7 @@ class AIUsageService:
         input_tokens: int,
         output_tokens: int,
         request_id: Optional[str] = None,
+        cost_usd: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """Record an AI usage operation.
 
@@ -43,21 +44,24 @@ class AIUsageService:
             input_tokens: Number of input tokens
             output_tokens: Number of output tokens
             request_id: Optional request identifier from API
+            cost_usd: Optional real cost reported by the API (preferred when present)
 
         Returns:
             Created usage record or None if failed
         """
-        # Calculate estimated cost (OpenRouter pricing varies by model)
-        # Approximate rates - update based on actual model pricing
-        cost_per_input_usd = 0.000001  # $0.001 per 1000 tokens approx
-        cost_per_output_usd = 0.000002  # $0.002 per 1000 tokens approx
+        if cost_usd is None:
+            # Estimate cost (OpenRouter pricing varies by model)
+            # Approximate rates - update based on actual model pricing
+            cost_per_input_usd = 0.000001  # $0.001 per 1000 tokens approx
+            cost_per_output_usd = 0.000002  # $0.002 per 1000 tokens approx
+            cost_usd = round(
+                (input_tokens * cost_per_input_usd) + (output_tokens * cost_per_output_usd), 6
+            )
 
-        estimated_cost_usd = round(
-            (input_tokens * cost_per_input_usd) + (output_tokens * cost_per_output_usd), 6
-        )
+        estimated_cost_usd = round(float(cost_usd), 6)
 
         # BRL conversion (simple fixed rate for tracking)
-        estimated_cost_brl = round(estimated_cost_usd * 5.2, 2)  # Approximate
+        estimated_cost_brl = round(estimated_cost_usd * 5.2, 6)  # Approximate
 
         data = {
             "provider": self.provider,

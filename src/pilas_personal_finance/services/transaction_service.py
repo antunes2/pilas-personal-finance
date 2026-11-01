@@ -158,7 +158,8 @@ class TransactionService:
             return None
 
         # 4. Determine category using AI or fallback rules
-        category, ai_usage_record = self._determine_category_with_ai(
+        # (AI usage recording already happens inside the helper)
+        category, _ = self._determine_category_with_ai(
             description, HARDCODED_CATEGORIES_EXPENSE
         )
 
@@ -184,15 +185,6 @@ class TransactionService:
             ai_category_confidence=category.get("ai_category_confidence"),
         )
 
-        # 7. Record AI usage if an AI call was made
-        if ai_usage_record:
-            self.ai_usage.record_usage(
-                operation="CLASSIFICATION",
-                input_tokens=ai_usage_record.get("input_tokens", 0),
-                output_tokens=ai_usage_record.get("output_tokens", 0),
-                request_id=ai_usage_record.get("request_id"),
-            )
-
         return tx
 
     def _determine_category_with_ai(self, description: str,
@@ -206,12 +198,13 @@ class TransactionService:
         ai_result = self.ai_service.classify(description, hardcoded_expense_categories)
 
         if ai_result:
-            # Record AI usage
+            # Record AI usage (real cost from OpenRouter when available)
             ai_usage_record = self.ai_usage.record_usage(
                 operation="CLASSIFICATION",
                 input_tokens=ai_result.get("input_tokens", 0),
                 output_tokens=ai_result.get("output_tokens", 0),
                 request_id=ai_result.get("request_id"),
+                cost_usd=ai_result.get("cost_usd"),
             )
 
             # AI returned a valid category with confidence
