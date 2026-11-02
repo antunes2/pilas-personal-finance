@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Relatório Financeiro {{ month }}</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+         color: #222; max-width: 860px; margin: 24px auto; padding: 0 16px; background: #fafafa; }
+  h1 { font-size: 1.5em; border-bottom: 3px solid #2e7d32; padding-bottom: 8px; }
+  h2 { font-size: 1.15em; color: #2e7d32; margin-top: 28px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+  .meta { color: #666; font-size: 0.9em; margin-bottom: 18px; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0 18px; background: #fff; }
+  th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; font-size: 0.95em; }
+  th { background: #e8f5e9; }
+  td.num, th.num { text-align: right; }
+  .kpi { display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0; }
+  .card { flex: 1 1 180px; background: #fff; border: 1px solid #ddd; border-radius: 8px;
+          padding: 12px 16px; }
+  .card .label { font-size: 0.85em; color: #666; }
+  .card .value { font-size: 1.35em; font-weight: 700; margin-top: 4px; }
+  .green { color: #2e7d32; } .amber { color: #b26a00; } .blue { color: #1565c0; }
+  .warn { color: #c62828; }
+  .empty { color: #888; font-style: italic; }
+  .uncertain { background: #fff8e1; border-left: 4px solid #b26a00;
+               padding: 8px 12px; margin: 10px 0; }
+  footer { margin-top: 36px; padding-top: 12px; border-top: 1px solid #ccc;
+           color: #777; font-size: 0.85em; }
+</style>
+</head>
+<body>
+
+<h1>📊 Relatório Financeiro — {{ month }}</h1>
+<div class="meta">
+  Gerado em {{ generated_at }} | Escopo: {{ scope_label }} |
+  Pessoas: {{ users | join(", ") }}
+</div>
+
+<!-- 2. Resumo executivo -->
+<h2>Resumo executivo</h2>
+<div class="kpi">
+  <div class="card">
+    <div class="label">Receitas realizadas</div>
+    <div class="value green">R$ {{ "%.2f"|format(total_incomes) }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Despesas realizadas</div>
+    <div class="value">R$ {{ "%.2f"|format(total_expenses) }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Disponível agora</div>
+    <div class="value green">R$ {{ "%.2f"|format(available_now) }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Disponível projetado</div>
+    <div class="value amber">R$ {{ "%.2f"|format(available_projected) }}</div>
+  </div>
+</div>
+<p class="uncertain">⚠️ <strong>A receber (incerto, não conta como dinheiro):
+R$ {{ "%.2f"|format(receivables_pending) }}</strong> — este valor depende de pagamento e
+não soma ao disponível confirmado.</p>
+
+<!-- 3. Gastos por categoria -->
+<h2>Gastos por categoria</h2>
+{% if by_category %}
+<table>
+  <tr><th>Categoria</th><th class="num">Total</th></tr>
+  {% for name, total in by_category.items() %}
+  <tr><td>{{ name }}</td><td class="num">R$ {{ "%.2f"|format(total) }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="empty">Sem despesas registradas no período.</p>
+{% endif %}
+
+<!-- 4. Gastos por pessoa -->
+<h2>Gastos por pessoa</h2>
+{% if by_person %}
+<table>
+  <tr><th>Pessoa</th><th class="num">Total</th></tr>
+  {% for name, total in by_person.items() %}
+  <tr><td>{{ name }}</td><td class="num">R$ {{ "%.2f"|format(total) }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="empty">Sem dados.</p>
+{% endif %}
+
+<!-- 5. Gastos por instrumento -->
+<h2>Gastos por instrumento de pagamento</h2>
+{% if by_instrument %}
+<table>
+  <tr><th>Instrumento</th><th class="num">Total</th></tr>
+  {% for name, total in by_instrument.items() %}
+  <tr><td>{{ name }}</td><td class="num">R$ {{ "%.2f"|format(total) }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="empty">Sem dados.</p>
+{% endif %}
+
+<!-- 6. Custos fixos -->
+<h2>Custos fixos</h2>
+<table>
+  <tr><th>Status</th><th>Descrição</th><th class="num">Valor</th></tr>
+  {% for f in fixed_paid %}
+  <tr><td class="green">✅ pago</td><td>{{ f.description }}</td><td class="num">R$ {{ "%.2f"|format(f.amount) }}</td></tr>
+  {% endfor %}
+  {% for f in fixed_pending %}
+  <tr><td class="amber">⏳ pendente</td><td>{{ f.description }}</td><td class="num">R$ {{ "%.2f"|format(f.amount) }}</td></tr>
+  {% endfor %}
+  {% for f in fixed_overdue %}
+  <tr><td class="warn">🔴 atrasado</td><td>{{ f.description }}</td><td class="num">R$ {{ "%.2f"|format(f.amount) }}</td></tr>
+  {% endfor %}
+</table>
+<p>Pendentes + atrasados somam <strong>R$ {{ "%.2f"|format(total_fixed_pending) }}</strong>.</p>
+
+<!-- 7. Orçamento -->
+<h2>Orçamento</h2>
+<table>
+  <tr><td>Consumido (despesas realizadas)</td><td class="num">R$ {{ "%.2f"|format(total_expenses) }}</td></tr>
+  <tr><td>Compromissos ainda pendentes</td><td class="num">R$ {{ "%.2f"|format(total_fixed_pending) }}</td></tr>
+  <tr><td><strong>Livre projetado até o fim do mês</strong></td><td class="num"><strong>R$ {{ "%.2f"|format(available_projected) }}</strong></td></tr>
+</table>
+
+<!-- 8. Contas a receber -->
+<h2>Contas a receber</h2>
+{% if receivables %}
+<table>
+  <tr><th>Devedor</th><th>Descrição</th><th class="num">Original</th><th class="num">Recebido</th><th>Status</th></tr>
+  {% for r in receivables %}
+  <tr>
+    <td>{{ r.debtor }}</td>
+    <td>{{ r.description }}</td>
+    <td class="num">R$ {{ "%.2f"|format(r.original) }}</td>
+    <td class="num">R$ {{ "%.2f"|format(r.received) }}</td>
+    <td>{{ r.status }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="empty">Nenhuma conta a receber em aberto.</p>
+{% endif %}
+
+<!-- 9. Análise da IA (comentários estruturados, validados e escapados) -->
+<h2>Análise (IA)</h2>
+{% if ai_analysis %}
+  {% if ai_analysis.observacoes %}
+  <p><strong>Observações:</strong></p>
+  <ul>{% for o in ai_analysis.observacoes %}<li>{{ o }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if ai_analysis.variacoes %}
+  <p><strong>Categorias com variação relevante:</strong></p>
+  <ul>{% for v in ai_analysis.variacoes %}<li>{{ v }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if ai_analysis.riscos %}
+  <p><strong>Riscos de estouro:</strong></p>
+  <ul>{% for r in ai_analysis.riscos %}<li>{{ r }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if ai_analysis.recomendacoes %}
+  <p><strong>Recomendações:</strong></p>
+  <ul>{% for r in ai_analysis.recomendacoes %}<li>{{ r }}</li>{% endfor %}</ul>
+  {% endif %}
+{% else %}
+<p class="empty">Análise da IA indisponível neste momento — os números acima continuam íntegros (base em SQL/Python).</p>
+{% endif %}
+
+<footer>
+  Relatório {{ month }} — {{ scope_label }}. Gerado pelo bot de controle financeiro.
+  Valores dependem dos registros informados pelos usuários; compras em cartão são contadas
+  na data da compra (pagamento da fatura não duplica despesa). Datas em BRL / brasileiro.
+</footer>
+
+</body>
+</html>

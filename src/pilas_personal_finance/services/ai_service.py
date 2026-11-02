@@ -219,3 +219,86 @@ INSTRUÇÕES:
 """
 
         return prompt
+
+    def analyze_report(self, summary_text: str) -> Optional[Dict[str, List[str]]]:
+        """Generate structured financial commentary for a report.
+
+        AI only INTERPRETS; all numbers are calculated deterministically in
+        Python and passed as read-only context. Output is validated against
+        schema - any deviation returns None (caller falls back gracefully).
+        """
+        if not self.api_key:
+            return None
+
+        prompt = (
+            "Você é um analista financeiro responsável por comentar um relatório mensal.\n"
+            "Baseie-se SOMENTE nos dados fornecidos. Não invente números.\n"
+            "Se faltar informação, diga isso explicitamente.\n\n"
+            "Retorne APENAS um JSON válido no formato:\n"
+            "{\n"
+            '  "observacoes": ["frase curta", ...],\n'
+            '  "variacoes": ["frase sobre categoria com gasto relevante", ...],\n'
+            '  "riscos": ["frase sobre risco de estouro", ...],\n'
+            '  "recomendacoes": ["recomendação prática", ...]\n'
+            "}\n"
+            "Cada campo: 2 a 3 itens, frases curtas, sem JSON aninhado.\n\n"
+            f"Dados do mês:\n{summary_text}"
+        )
+
+        try:
+            import httpx
+
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "http://localhost:8000",
+                "X-Title": "Personal Finance Bot",
+            }
+
+            payload = {
+                "model": self.default_model,
+                "messages": [
+                    {"role": "system", "content": "Você é um analista financeiro que responde apenas com JSON válido."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.2,
+                "usage": {"include": True},
+            }
+
+            response = httpx.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=30,
+            )
+
+            if response.status_code != 200:
+                logger.error(f"OpenRouter API error (analyze): {response.status_code} - {response.text}")
+                return None
+
+            result = response.json()
+            message_content = result["choices"][0]["message"]["content"]
+
+            try:
+                raw_content = message_content.strip()
+                if raw_content.startswith("```"):
+                    raw_content = re.sub(r"^```[a-zA-Z]*\s*", "", raw_content)
+                    raw_content = re.sub(r"\s*```$", "", raw_content)
+                data = json.loads(raw_content.strip())
+
+                expected_keys = ("observacoes", "variacoes", "riscos", "recomendacoes")
+                validated: Dict[str, List[str]] = {}
+                for key in expected_keys:
+                    items = data.get(key, [])
+                    if not isinstance(items, list):
+                        raise ValueError(f"field {key} is not a list")
+                    validated[key] = [str(i)[:200] for i in items[:3]]
+                return validated
+
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.error(f"Failed to validate AI report analysis: {e}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error during AI report analysis: {e}")
+            return None

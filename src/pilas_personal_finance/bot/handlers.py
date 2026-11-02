@@ -730,16 +730,63 @@ async def categorias_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def relatorio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Placeholder: HTML report is Phase 5 (per spec)."""
+    """Generate the monthly HTML report and send it as a document.
+
+    Usage: /relatorio [mes|individual|casal|2026-11]
+    Default: current month, individual scope for the requester.
+    """
     user = update.effective_user
     if not is_authorized(user.id, user.username):
         await update.message.reply_text("Acesso negado.")
         return
-    await update.message.reply_text(
-        "📄 O relatório HTML chega na Fase 5 (Jinja2 + análise IA).\n"
-        "Por enquanto use /orcamento (números) e /fixos (pendências).",
-        reply_markup=get_main_keyboard(),
-    )
+
+    from pilas_personal_finance.services.report_service import generate_report
+
+    args = (context.args or [])
+    scope = "individual"
+    month = None
+    for a in args:
+        a = a.lower()
+        if a in ("mes", "mês", "m", "current", "atual"):
+            continue  # month stays default (current)
+        elif a in ("individual", "pessoal"):
+            scope = "individual"
+        elif a in ("casal", "casal (consolidado)", "consolidado", "conjunto"):
+            scope = "casal"
+        elif re.fullmatch(r"\d{4}-\d{2}", a):
+            month = a
+        else:
+            await update.message.reply_text(
+                "Uso: /relatorio [mes|individual|casal|2026-11]\n"
+                "Ex: /relatorio casal  |  /relatorio 2026-10",
+                reply_markup=get_main_keyboard(),
+            )
+            return
+
+    await update.message.chat.send_action("upload_document")
+    status = await update.message.reply_text("📄 Gerando relatório...")
+    supabase = get_supabase()
+    try:
+        path = generate_report(
+            supabase, scope=scope, month=month, telegram_user_id=user.id
+        )
+    except ValueError:
+        await status.edit_text("Usuário não registrado. Use /start primeiro.")
+        return
+    except Exception:
+        logger.exception("report generation failed")
+        await status.edit_text("Erro ao gerar o relatório. Tente novamente.")
+        return
+
+    if not path or not os.path.exists(path):
+        await status.edit_text("Não foi possível montar o relatório (sem dados?).")
+        return
+
+    caption = f"📊 Relatório {month or 'mês atual'} — {'casal' if scope == 'casal' else 'individual'}"
+    with open(path, "rb") as f:
+        await update.message.reply_document(f, filename=os.path.basename(path), caption=caption)
+    await status.delete()
+    os.remove(path)
 
 
 async def orcamento_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
