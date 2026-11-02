@@ -129,6 +129,37 @@ def _normalize_desc(text: str) -> str:
     ).decode("ascii").strip()
 
 
+def ensure_month_occurrences(supabase: Client, user_id: str, month: str) -> None:
+    """Materializa a ocorrência do mês para cada recorrência ativa (se faltar).
+
+    Idempotente: respeita a constraint unique (recurring_expense_id, period_month).
+    """
+    import calendar
+    active = get_user_recurring_expenses(supabase, user_id, active_only=True)
+    if not active:
+        return
+    existing = supabase.from_("recurring_expense_occurrences").select(
+        "recurring_expense_id"
+    ).gte("period_month", f"{month}-01").lte(
+        "period_month", f"{month}-{calendar.monthrange(int(month[:4]), int(month[5:7]))[1]:02d}"
+    ).in_("recurring_expense_id", [r["id"] for r in active]).execute()
+    have = {row["recurring_expense_id"] for row in (existing.data or [])}
+    for rec in active:
+        if rec["id"] in have:
+            continue
+        try:
+            supabase.from_("recurring_expense_occurrences").insert({
+                "recurring_expense_id": rec["id"],
+                "period_month": f"{month}-01",
+                "expected_amount": float(rec["expected_amount"]),
+                "status": "EXPECTED",
+            }).execute()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"ensure_month_occurrences failed for {rec['id']}: {e}")
+
+
 def find_pending_occurrence(
     supabase: Client,
     user_id: str,
@@ -145,6 +176,10 @@ def find_pending_occurrence(
     """
     from datetime import date
     today = date.today()
+    # Materialize current-month occurrences so a brand-new recurring expense
+    # can already be matched by a natural payment message
+    year_now, mon_now = today.year, today.month
+    ensure_month_occurrences(supabase, user_id, f"{year_now:04d}-{mon_now:02d}")
     # Parent descriptions live in recurring_expenses (occurrences have none)
     parents = {r["id"]: r.get("description", "") for r in
                get_user_recurring_expenses(supabase, user_id, active_only=False)}
@@ -214,11 +249,13 @@ def calculate_budget_projection(
     month: str,
 ) -> Dict[str, Any]:
     """Calcula a projeção orçamentária até o fim do mês.
-    
+
+    user_id: UUID da tabela app_users (FK de transactions).
+
     Fórmula:
     Orçamento livre = saldo inicial + receitas previstas + benefícios -
     despesas já realizadas - custos fixos ainda não pagos - reservas
-    
+
     Returns dict with:
     - available_now: based on received/spent confirmed
     - available_projected: includes expected revenues and commitments
@@ -227,54 +264,55 @@ def calculate_budget_projection(
     - total_forecast: projected total
     - receiveables_pending: amounts a receber (não confirmados)
     """
-    from datetime import datetime
-    
-    # Get user's transactions for the month
-    transactions_result = supabase.from_("transactions").select(
-        "*", count="exact"
-    ).eq("user_id", user_id).gte(
-        "transaction_date", f"{month}-01"
-    ).lte("transaction_date", f"{month}-31")
-    
-    transactions_result.execute()
-    transactions = transactions_result.data or []
-    
-    # Count expenses and income
+    import calendar
+
+    year = int(month[:4])
+    mon = int(month[5:7])
+    last_day = calendar.monthrange(year, mon)[1]
+
+    # 1. Month transactions (real UUID user_id)
+    result = supabase.from_("transactions").select("*").eq(
+        "user_id", user_id
+    ).gte("transaction_date", f"{month}-01").lte(
+        "transaction_date", f"{month}-{last_day:02d}"
+    ).execute()
+    transactions = result.data or []
+
     expenses = [t for t in transactions if t.get("type") == "EXPENSE"]
     income = [t for t in transactions if t.get("type") == "INCOME"]
-    
-    # Get recurring expenses
-    recurring = get_user_recurring_expenses(supabase, user_id)
-    
-    # Calculate totals
-    total_expenses_realized = sum(t.get("amount", 0) for t in expenses)
-    total_income_received = sum(t.get("amount", 0) for t in income)
-    
-    # Get pending fixed costs
-    fixed_pending = 0
-    for re in recurring:
-        if re.get("is_active") and re.get("status") != "PAID":
-            # Check if occurrence for this month is pending
-            fixed_pending += re.get("expected_amount", 0)
-    
-    # Available now = income received - expenses realized
-    available_now = total_income_received - total_expenses_realized
-    if available_now < 0:
-        available_now = 0
-    
-    # Available projected = available now + income expected - fixed pending
-    # Note: we don't double-count receivables as confirmed money
+    total_expenses_realized = sum(float(t.get("amount") or 0) for t in expenses)
+    total_income_received = sum(float(t.get("amount") or 0) for t in income)
+
+    # 2. Fixed costs pending: by actual occurrences of the month
+    ensure_month_occurrences(supabase, user_id, month)
+    monthly_occ = get_upcoming_occurrences(supabase, user_id, month)
+    fixed_pending = sum(
+        float(o.get("expected_amount") or 0)
+        for o in monthly_occ
+        if o.get("status") in ("EXPECTED", "OVERDUE", None)
+    )
+
+    # 3. Receivables pending (OPEN/PARTIAL) - never counted as confirmed money
+    receivables_result = supabase.from_("receivables").select(
+        "original_amount, received_amount, status"
+    ).eq("creditor_user_id", user_id).in_(
+        "status", ["OPEN", "PARTIAL"]
+    ).execute()
+    receivables_pending = sum(
+        float(r.get("original_amount") or 0) - float(r.get("received_amount") or 0)
+        for r in (receivables_result.data or [])
+    )
+
+    # 4. Perspectives
+    available_now = max(total_income_received - total_expenses_realized, 0)
     available_projected = available_now - fixed_pending
-    
-    # Receivables pending (would be separate query)
-    receiveables_pending = 0  # Placeholder
-    
+
     return {
         "available_now": round(available_now, 2),
         "available_projected": round(available_projected, 2),
         "total_expenses_realized": round(total_expenses_realized, 2),
         "total_fixed_pending": round(fixed_pending, 2),
         "total_forecast": round(available_projected, 2),
-        "receiveables_pending": round(receiveables_pending, 2),
+        "receiveables_pending": round(receivables_pending, 2),
         "period": month,
     }

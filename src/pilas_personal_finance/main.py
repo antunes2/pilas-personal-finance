@@ -52,6 +52,11 @@ def get_supabase() -> create_client:
     return create_client(supabase_url, supabase_key)
 
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Central error handler - logs and doesn't crash the bot."""
+    logger.error("Unhandled error: %s", context.error, exc_info=context.error)
+
+
 async def post_init(application: Application):
     """Called after the application is initialized."""
     await application.bot.set_my_commands(COMMAND_LIST)
@@ -80,6 +85,9 @@ def main():
     application.add_handler(CommandHandler("receber", receber_command))
     application.add_handler(CommandHandler("recebimentos", list_receivables_command))
     application.add_handler(CommandHandler("registrar", registrar_recebimento_command))
+
+    # Central error handler
+    application.add_error_handler(on_error)
     
     # Add natural message handler (must be after command handlers)
     # We handle all text that doesn't start with /

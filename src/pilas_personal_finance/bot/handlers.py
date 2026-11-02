@@ -267,13 +267,13 @@ async def fixos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Format the list
-    text = "📋 **Despesas Recorrentes Cadastradas**\n\n"
+    text = "📋 Despesas Recorrentes Cadastradas\n\n"
     for i, exp in enumerate(recurring, 1):
         text += f"{i}. {exp['description']} - R$ {float(exp['expected_amount']):.2f} ({exp.get('frequency', 'mensal')}) - {exp.get('scope', 'PERSONAL')}\n"
 
     text += "\nUse /fixos adicionar para cadastrar uma nova recorrência.\nUse /pagar para marcar o pagamento."
 
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await update.message.reply_text(text, reply_markup=get_main_keyboard())
 
 
 async def fixos_adicionar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -298,40 +298,67 @@ async def fixos_adicionar_command(update: Update, context: ContextTypes.DEFAULT_
             supabase = get_supabase()
 
             m = re.match(
-                r"^(?P<desc>.+?)\s+(?P<value>\d+[.,]?\d*)\s*"
-                r"(?P<freq>mensal|semanal|anual)?\s*(?P<day>\d{1,2})?$",
+                r"^(?P<desc>.+?)\s+(?P<value>\d+[.,]?\d*)"
+                r"(?:\s+no\s+(?P<instr>.+?))?"
+                r"(?:\s+(?P<freq>mensal|semanal|anual))?"
+                r"(?:\s+(?P<day>\d{1,2}))?$",
                 text.strip(),
                 re.IGNORECASE,
             )
             if not m:
                 await update.message.reply_text(
-                    "Formato: `/fixos adicionar Descrição valor [mensal|semanal|anual] [dia]`\n"
-                    "Ex: `/fixos adicionar Aluguel 1500 mensal 5`",
+                    "Formato: `/fixos adicionar Descrição valor [no cartão/boleto] [mensal|semanal|anual] [dia]`\n"
+                    "Ex: `/fixos adicionar Netflix 39,90 no Inter mensal 5`\n"
+                    "Ex: `/fixos adicionar Aluguel 1500 boleto mensal 5`",
                     parse_mode="Markdown",
                 )
                 return
 
             description = m.group("desc").strip()
             value = float(m.group("value").replace(",", "."))
+            instr_name = m.group("instr")
             freq = (m.group("freq") or "mensal").lower()
             day = int(m.group("day")) if m.group("day") else None
 
-            # Resolve authenticated user id
+            # Resolve authenticated user + payment instrument
             user_repo = AppUsersRepo(supabase)
             user = user_repo.find_by_telegram_id(telegram_user_id)
             if not user:
                 await update.message.reply_text("Usuário não encontrado. Use /start primeiro.")
                 return
 
+            instrument_id = None
+            instrument_label = "boleto/indefinido"
+            if instr_name and instr_name.lower() != "boleto":
+                from pilas_personal_finance.repositories import PaymentInstrumentsRepo
+                instr_repo = PaymentInstrumentsRepo(supabase)
+                candidates = (instr_repo.find_by_owner(user["id"]) +
+                              instr_repo.find_shared())
+                instr = next(
+                    (i for i in candidates
+                     if i.get("name", "").lower() == instr_name.lower().strip()),
+                    None,
+                )
+                if instr:
+                    instrument_id = instr["id"]
+                    instrument_label = instr["name"]
+                else:
+                    await update.message.reply_text(
+                        f"⚠️ Instrumento \"{instr_name}\" não encontrado - cadastro sem instrumento.\n"
+                        "Instrumentos existentes: " + ", ".join(
+                            i["name"] for i in candidates[:8]))
+
             try:
                 rec = create_recurring_expense(
                     supabase, user["id"], description, None,
                     value, freq, due_day=day,
+                    payment_instrument_id=instrument_id,
                 )
                 await update.message.reply_text(
                     f"✅ Despesa fixa cadastrada: {rec['description']} - "
                     f"R$ {float(rec['expected_amount']):.2f} ({rec['frequency']}"
-                    + (f", vence dia {day})" if day else ")")
+                    + (f", vence dia {day}" if day else "")
+                    + f", origem: {instrument_label})"
                 )
             except Exception as e:
                 await update.message.reply_text(f"Erro ao cadastrar: {str(e)[:200]}")
@@ -361,35 +388,59 @@ async def fixos_pagos_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
     supabase = get_supabase()
-    service = TransactionService(supabase)
-    
-    recurring = get_user_recurring_expenses(supabase, telegram_user_id)
-    
-    # Separate paid and pending
-    paid = [r for r in recurring if r.get('status') == 'PAID' or r.get('is_active') == False]
-    pending = [r for r in recurring if r.get('status') != 'PAID' and r.get('is_active')]
-    
-    text = "💰 **Despesas Recorrentes**\n\n"
-    
+    app_user = AppUsersRepo(supabase).find_by_telegram_id(telegram_user_id)
+    if not app_user:
+        await update.message.reply_text("Usuário não registrado. Use /start primeiro.")
+        return
+
+    from datetime import datetime
+    import pytz
+    tz = pytz.timezone("America/Sao_Paulo")
+    current_month = datetime.now(tz).strftime("%Y-%m")
+
+    from pilas_personal_finance.services.recurring_expense_service import (
+        ensure_month_occurrences, get_upcoming_occurrences,
+    )
+    ensure_month_occurrences(supabase, app_user["id"], current_month)
+    occurrences = get_upcoming_occurrences(supabase, app_user["id"], current_month)
+
+    parents = {r["id"]: r for r in get_user_recurring_expenses(
+        supabase, app_user["id"], active_only=False)}
+
+    paid, pending = [], []
+    for o in occurrences:
+        rec = parents.get(o.get("recurring_expense_id"), {})
+        item = {
+            "description": rec.get("description", "?"),
+            "amount": o.get("actual_amount") or o.get("expected_amount"),
+            "frequency": rec.get("frequency", "mensal"),
+            "due_day": rec.get("due_day"),
+            "status": o.get("status"),
+        }
+        (paid if o.get("status") == "PAID" else pending).append(item)
+
+    text = f"💰 Despesas fixas de {current_month}\n\n"
+
     if paid:
-        text += "✅ **Pagas:**\n"
+        text += "✅ Pagas:\n"
         for r in paid:
-            text += f"• {r['description']} - R$ {r['expected_amount']:.2f} ({r['frequency']})\n"
+            text += f"• {r['description']} - R$ {float(r['amount']):.2f}\n"
         text += "\n"
     else:
-        text += "Não há despesas recorrentes marcadas como pagas.\n\n"
-    
+        text += "Nenhuma despesa fixa paga este mês.\n\n"
+
     if pending:
-        text += "⏳ **Pendentes:**\n"
+        text += "⏳ Pendentes:\n"
         for r in pending:
-            text += f"• {r['description']} - R$ {r['expected_amount']:.2f} ({r['frequency']}) - Vencimento: dia {r.get('due_day', 'non specified')}\n"
+            day = f", vence dia {r['due_day']}" if r.get('due_day') else ""
+            text += f"• {r['description']} - R$ {float(r['amount']):.2f} ({r['frequency']}{day})\n"
         text += "\n"
     else:
-        text += "Não há despesas recorrentes pendentes.\n\n"
-    
-    text += "Use /pagar para marcar uma ocorrência como paga."
-    
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        text += "Nenhuma despesa fixa pendente.\n\n"
+
+    text += "Use /pagar para marcar manualmente, ou registre o gasto naturalmente (ex: 'Netflix 39,90 no Inter') - detecto e fecho sozinho."
+
+    await update.message.reply_text(text, reply_markup=get_main_keyboard())
 
 
 async def pagar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -544,8 +595,8 @@ async def list_receivables_command(update: Update, context: ContextTypes.DEFAULT
         text += f"   Já recebido: R$ {r.get('received_amount', 0):.2f}\n"
         text += f"   Status: {r.get('status', 'OPEN')}\n"
         text += f"   Data: {r.get('created_date', 'N/A')[:10]}\n\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+
+    await update.message.reply_text(text, reply_markup=get_main_keyboard())
 
 
 async def registrar_recebimento_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -631,103 +682,68 @@ async def registrar_recebimento_command(update: Update, context: ContextTypes.DE
 
 async def orcamento_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /orcamento command.
-    
+
     Show budget projection for the current month with three perspectives:
     - Disponível agora (confirmed)
     - Disponível projetado (expected revenues + commitments)
     - Cenário incluindo recebíveis (identified as uncertain)
     """
     user = update.effective_user
-    telegram_user_id = user.id
-    username = user.username
-
-    if not is_authorized(telegram_user_id, username):
+    if not is_authorized(user.id, user.username):
         await update.message.reply_text("Acesso negado.")
         return
 
-
     supabase = get_supabase()
-    service = TransactionService(supabase)
-    
-    # Get current month
+    app_user = AppUsersRepo(supabase).find_by_telegram_id(user.id)
+    if not app_user:
+        await update.message.reply_text("Usuário não registrado. Use /start primeiro.")
+        return
+
     from datetime import datetime
     import pytz
     tz = pytz.timezone("America/Sao_Paulo")
     current_month = datetime.now(tz).strftime("%Y-%m")
-    
-    # Calculate budget projection
-    projection = calculate_budget_projection(supabase, telegram_user_id, current_month)
-    
-    # Get user's recurring expenses
-    recurring = get_user_recurring_expenses(supabase, telegram_user_id)
-    
-    # Get recent transactions
-    result = supabase.from_("transactions").select(
-        "*", count="exact"
-    ).eq("user_id", telegram_user_id).gte(
-        "transaction_date", f"{current_month}-01"
-    ).lte("transaction_date", f"{current_month}-31")
-    result.execute()
-    transactions = result.data or []
-    
-    # Categorize transactions
-    expenses = [t for t in transactions if t.get("type") == "EXPENSE"]
-    incomes = [t for t in transactions if t.get("type") == "INCOME"]
-    
-    # Calculate totals
-    total_expenses = sum(t.get("amount", 0) for t in expenses)
-    total_incomes = sum(t.get("amount", 0) for t in incomes)
-    
-    # Fixed costs pending (not paid)
-    fixed_pending = sum(r.get("expected_amount", 0) for r in recurring if r.get('is_active') and r.get('status') != 'PAID')
-    
-    # Available NOW = income received - expenses realized
-    # Based on confirmed values only (not expected/received)
-    available_now = total_incomes - total_expenses
-    if available_now < 0:
-        available_now = 0
-    
-    # Available PROJECTED = available now + expected benefits - fixed pending
-    # Includes expected revenues and future commitments, but NOT open receivables as confirmed money
-    available_projected = available_now - fixed_pending + projection['available_projected'] - projection['available_now']
-    
-    # Receivables pending (shown separately, NOT added to confirmed values)
-    receiveables_pending = projection.get('receiveables_pending', 0)
-    
-    # Build the message with three perspectives per spec
-    text = f"📊 **Orçamento de {current_month}**\n\n"
-    
-    # Line 1: Disponível agora
-    text += f"🟢 **Disponível agora:** R$ {available_now:.2f}\n"
-    text += f"   * baseado em valores efetivamente recebidos e gastos confirmados\n\n"
-    
-    # Line 2: Disponível projetado
-    text += f"🟡 **Disponível projetado até o fim do mês:** R$ {available_projected:.2f}\n"
-    text += f"   * inclui receitas esperadas e compromissos futuros\n\n"
-    
-    # Line 3: Cenário incluindo recebíveis (opcional, identificado como incerto)
-    text += f"🔵 **Cenário incluindo recebíveis:** R$ {available_projected + receiveables_pending:.2f}\n"
-    text += f"   * identificado como incerto, NÃO somado ao disponível confirmado\n\n"
-    
-    # Summary section
-    text += f"📊 **Resumo:**\n"
+
+    try:
+        projection = calculate_budget_projection(supabase, app_user["id"], current_month)
+    except Exception as e:
+        logger.error(f"/orcamento failed: {e}")
+        await update.message.reply_text("Erro ao calcular o orçamento. Tente novamente.")
+        return
+
+    available_now = projection["available_now"]
+    available_projected = projection["available_projected"]
+    receiveables_pending = projection["receiveables_pending"]
+    total_incomes = _income_line(supabase, app_user["id"], current_month)
+
+    text = f"📊 Orçamento de {current_month}\n\n"
+    text += f"🟢 Disponível agora: R$ {available_now:.2f}\n"
+    text += f"   (valores efetivamente recebidos e gastos confirmados)\n\n"
+    text += f"🟡 Disponível projetado até o fim do mês: R$ {available_projected:.2f}\n"
+    text += f"   (abate custos fixos ainda pendentes)\n\n"
+    text += f"🔵 Cenário incluindo recebíveis: R$ {available_projected + receiveables_pending:.2f}\n"
+    text += f"   (incerto - recebíveis NÃO são dinheiro confirmado)\n\n"
+    text += "📊 Resumo:\n"
     text += f"   • Total de receitas recebidas: R$ {total_incomes:.2f}\n"
-    text += f"   • Total de despesas realizadas: R$ {total_expenses:.2f}\n"
-    text += f"   • Custos fixos pendentes: R$ {fixed_pending:.2f}\n"
-    text += f"   • Livre para gastos: R$ {available_projected:.2f}\n\n"
-    
-    # Receivables note
+    text += f"   • Total de despesas realizadas: R$ {projection['total_expenses_realized']:.2f}\n"
+    text += f"   • Custos fixos pendentes: R$ {projection['total_fixed_pending']:.2f}\n\n"
     if receiveables_pending > 0:
-        text += f"⚠️ **Contas a receber (pendentes):** R$ {receiveables_pending:.2f}\n"
-        text += f"   *Não somado ao disponível confirmado* (identificado como incerto)\n\n"
-    
-    # Key recommendations
-    text += f"💡 **Recomendações:**\n"
-    text += f"   • Gastos livres: R$ {max(0, available_projected):.2f}\n"
-    text += f"   • Cuidado ao considerar recebíveis como dinheiro disponível\n"
-    text += f"   • Orçamento projetado considera compromissos futuros\n\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        text += f"⚠️ A receber (não confirmado): R$ {receiveables_pending:.2f}\n"
+        text += "   (não somado ao disponível confirmado)\n"
+
+    await update.message.reply_text(text, reply_markup=get_main_keyboard())
+
+
+def _income_line(supabase, user_uuid, month):
+    """Total received income for the month (confirmed INCOME transactions)."""
+    try:
+        rows = supabase.from_("transactions").select("amount, type").eq(
+            "user_id", user_uuid).eq("type", "INCOME").gte(
+            "transaction_date", f"{month}-01").execute()
+        return round(sum(float(r["amount"]) for r in (rows.data or [])), 2)
+    except Exception as e:
+        logger.warning(f"_income_line failed: {e}")
+        return 0
 
 
 # --- Natural Message Handler ---
