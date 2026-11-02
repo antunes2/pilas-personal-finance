@@ -36,9 +36,19 @@
 
 ### /fixos
 - Lista despesas recorrentes (aluguel, internet, assinaturas)
-- Use `/fixos adicionar` para cadastrar uma nova recorrência
-- Use `/fixos pagos` para ver quais estão pagas e pendentes
-- Use `/pagar` para marcar uma ocorrência como paga
+- `/fixos adicionar Netflix 39,90 no Inter mensal 5` cadastra (origem: cartão/boleto)
+- `/fixos pagos` mostra pagas e pendentes do mês
+- `/pagar` marca uma ocorrência como paga manualmente
+- **Ao registrar o gasto naturalmente (ex: `Netflix 39,90 no Inter`), o bot detecta e fecha a ocorrência do mês sozinho**
+
+### /pagar
+- Marca uma despesa fixa como paga manualmente (formato: `/pagar <número>` da lista pendente)
+
+### /receber
+- Contas a receber ("me devem")
+- `/receber João jantar do aniversário 80` cadastra
+- `/recebimentos` lista em aberto (com soma não confirmada)
+- `/registrar <número da lista> <valor>` registra recebimento (parcial ou total); o valor entra como receita no orçamento
 
 ### /categorias
 - Lista todas as categorias válidas de despesa e receita
@@ -46,18 +56,11 @@
 
 ### /cartoes
 - Lista todos os instrumentos de pagamento cadastrados
-- Útil para verificar quais bancos/cartões estão no sistema
+- Instrumentos são criados automaticamente quando mencionados nas mensagens
 
 ### /relatorio
-- Gera um relatório HTML com todas as informações financeiras
-- Inclui: receitas, gastos, cartões, fixos, recebíveis e projeção
-- O arquivo é enviado pelo Telegram
-
-### /ajuda
-- Mostra exemplos de uso (já descrito acima)
-
-### /resumo
-- Mostra um resumo rápido do período atual
+- Em desenvolvimento (Fase 5): relatório HTML + análise IA
+- Por enquanto: /orcamento e /fixos cobrem os números
 
 ## Registro de Transações Naturais
 
@@ -71,7 +74,8 @@ O bot aceita mensagens sem necessidade de comandos. Basta escrever:
 - `Uber 18,90 no Inter débito` → despesa de R$ 18,90 no débito do Inter
 - `Mercado 235,70 no Pix Nubank` → despesa de R$ 235,70 via Pix no Nubank
 - `VR 38,00 no vale refeição` → benefício de R$ 38,00
-- `Salário 5000` → receita de R$ 5.000
+- `Recebi 6500 de salário` → receita de R$ 6.500 (categoria Salário)
+- `Ganhei 300 de freela` → receita de R$ 300 (Outras Entradas)
 - `Gás 150,00` → despesa de R$ 150,00 (categoria "Outros" por padrão)
 
 ### Como a IA classifica:
