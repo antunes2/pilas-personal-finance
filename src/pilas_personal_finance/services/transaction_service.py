@@ -60,6 +60,8 @@ HARDCODED_CATEGORIES_INCOME = [
 INCOME_TRIGGER_WORDS = {
     "recebi", "recebemos", "ganhei", "ganhamos", "reembolso", "restituicao",
     "bonus", "decimo terceiro", "13º", "13o", "13o", "freela", "pix recebido",
+    # benefits (VR/VA/vale) are money in, not expense:
+    "vr ", "va ", "vale ", "vale:", "beneficio", "benefício",
 }
 
 # Map income keywords to hardcoded income categories
@@ -77,6 +79,12 @@ INCOME_KEYWORD_MAP = {
     "restituicao": "Reembolso",
     "restituição": "Reembolso",
 }
+
+# Natural receivable creation ("joao me deve 80 do jantar")
+RECEIVABLE_CREATE_TRIGGERS = ("me deve", "me devem")
+
+# Natural payment of a receivable ("joao me pagou 30", "recebi 30 do joao")
+RECEIVABLE_PAYMENT_TRIGGERS = ("me pagou", "me pagaram", "me pag")
 
 CATEGORY_KEYWORD_MAP = {
     # Expense categories
@@ -258,7 +266,10 @@ class TransactionService:
 
         # Build description: message minus trigger words, value and stopwords
         description = re.sub(r"(\d+[.,]?\d*)", "", message).strip()
-        for trigger in (r"\brecebi\b", r"\brecebemos\b", r"\bganhei\b", r"\bganhamos\b"):
+        for trigger in (r"\brecebi\b", r"\brecebemos\b", r"\bganhei\b",
+                        r"\bganhamos\b", r"\bvr\b", r"\bva\b",
+                        r"vale\s+refei\w*", r"vale\s+aliment\w*", r"\bvale\b",
+                        r"\bbenefic\w*", r"\bno\b", r"\bdo\b", r"\bda\b"):
             description = re.sub(trigger, "", description, flags=re.IGNORECASE)
         description = re.sub(r"^\s*(que\s+|de\s+|do\s+|da\s+|dos\s+|das\s+)+", "",
                              description, flags=re.IGNORECASE).strip(" ,.-")
@@ -270,8 +281,10 @@ class TransactionService:
         if not user:
             user = self.users_repo.create(telegram_user_id, display_name=f"User {telegram_user_id}")
 
-        # 2. Resolve income category (deterministic keyword fallback)
-        norm_desc = _normalize_accentless(description)
+        # 2. Resolve income category (deterministic keyword fallback).
+        # Match against the FULL message too: trigger/instrument words like
+        # "vr"/"vale" are stripped from the description for display.
+        norm_desc = _normalize_accentless(message + " " + description).lower()
         category_name = "Outras Entradas"
         for keyword, cat in INCOME_KEYWORD_MAP.items():
             if _normalize_accentless(keyword) in norm_desc:
@@ -297,6 +310,181 @@ class TransactionService:
             ai_category_confidence=None,
         )
         return tx
+
+    # ------------------------------------------------------------------
+    # Natural receivable flow ("butter": /receber e /registrar sem comandos)
+    # ------------------------------------------------------------------
+
+    def is_receivable_message(self, message: str) -> bool:
+        norm = _normalize_accentless(message).lower()
+        return any(t in norm for t in RECEIVABLE_CREATE_TRIGGERS)
+
+    def register_receivable_message(self, telegram_user_id: int, message: str,
+                                    telegram_update_id: int) -> Optional[Dict[str, Any]]:
+        """Create an open receivable from natural language.
+
+        Expected: "joao me deve 80 do jantar" / "joão me devem 80".
+        Debtor = words before "me deve(s)"; description = remainder.
+        """
+        match = re.search(r"(\d+[.,]?\d*)", message.replace("R$", "").replace("$", ""))
+        if not match:
+            return None
+        try:
+            value = float(match.group(1).replace(",", "."))
+        except ValueError:
+            return None
+        if value <= 0:
+            return None
+
+        lower = message.lower()
+        trigger_pos = min(
+            (lower.index(t) for t in RECEIVABLE_CREATE_TRIGGERS if t in lower),
+            default=-1,
+        )
+        if trigger_pos < 0:
+            return None
+
+        debtor_raw = message[:trigger_pos]
+        after = message[match.end():]
+        description = re.sub(
+            r"^\s*(do|da|dos|das|pelo|pela|por|referente|para)\s+", "", after,
+            flags=re.IGNORECASE).strip(" ,.-")
+        if not description:
+            description = "Dívida"
+
+        debtor_name = debtor_raw.strip(" ,-:")
+        debtor_name = re.sub(r"^(o|a|pra|para|pro)\s+", "", debtor_name,
+                             flags=re.IGNORECASE).strip()
+        if not debtor_name or not re.search(r"[a-zA-ZÀ-ú]", debtor_name):
+            debtor_name = "Não identificado"
+        debtor_name = debtor_name[:40]
+
+        user = self.users_repo.find_by_telegram_id(telegram_user_id)
+        if not user:
+            return None
+
+        r = self.supabase.from_("receivables").insert({
+            "creditor_user_id": user["id"],
+            "debtor_name": debtor_name,
+            "description": description,
+            "original_amount": value,
+            "received_amount": 0,
+            "created_date": self._parse_date(message),
+            "scope": "PERSONAL",
+            "status": "OPEN",
+        }).execute()
+        return (r.data or [None])[0]
+
+    def register_receivable_payment_by_message(
+        self, telegram_user_id: int, message: str,
+        telegram_update_id: int) -> Optional[Dict[str, Any]]:
+        """Detect a payment that settles (part of) an open receivable.
+
+        Triggers: "joao me pagou 30", "recebi 30 do joao", "recebemos 50 da ana".
+        Match is deterministic: debtor words overlap between message and the
+        open receivable's debtor_name. Returns None if no receivable matches
+        (caller falls back to plain income flow).
+        """
+        match = re.search(r"(\d+[.,]?\d*)", message.replace("R$", "").replace("$", ""))
+        if not match:
+            return None
+        try:
+            value = float(match.group(1).replace(",", "."))
+        except ValueError:
+            return None
+        if value <= 0:
+            return None
+
+        user = self.users_repo.find_by_telegram_id(telegram_user_id)
+        if not user:
+            return None
+
+        debtor_candidates = self._extract_debtor_from_payment(message)
+        if not debtor_candidates:
+            return None
+
+        open_recs = self.supabase.from_("receivables").select("*").eq(
+            "creditor_user_id", user["id"]).in_(
+            "status", ["OPEN", "PARTIAL"]).order("created_date", desc=False).execute().data or []
+        if not open_recs:
+            return None
+
+        target = None
+        for rec in open_recs:
+            debtor_norm = _normalize_accentless(str(rec.get("debtor_name", ""))).lower()
+            if any(c in debtor_norm for c in debtor_candidates):
+                target = rec
+                break
+        if target is None:
+            return None
+
+        original = float(target["original_amount"])
+        received = float(target.get("received_amount") or 0)
+        pending = round(original - received, 2)
+        applied = min(value, pending)
+        total = round(received + applied, 2)
+        status = "PAID" if total >= round(original, 2) - 0.005 else "PARTIAL"
+
+        self.supabase.from_("receivables").update({
+            "received_amount": total,
+            "status": status,
+        }).eq("id", target["id"]).execute()
+
+        desc_words = message[:match.start()].strip(" ,.-") or str(target["description"])
+        tx = self.transactions_repo.create(
+            user_id=uuid.UUID(user["id"]),
+            category_id=self._resolve_category_db_id(
+                {"id": "Reembolso", "name": "Reembolso", "transaction_type": "INCOME"}),
+            payment_instrument_id=None,
+            tx_type="INCOME",
+            scope="PERSONAL",
+            amount=applied,
+            description=f"Recebimento de {target['debtor_name']}: {desc_words[:60]}",
+            transaction_date=self._parse_date(message),
+            competence_month=None,
+            source="TELEGRAM",
+            telegram_update_id=telegram_update_id,
+            ai_category_confidence=None,
+            external_reference=target["id"],
+        )
+
+        return {
+            "receivable": target,
+            "applied": applied,
+            "received_total": total,
+            "original": original,
+            "status": status,
+            "overpaid": round(value - applied, 2),
+            "tx": tx,
+        }
+
+    def _extract_debtor_from_payment(self, message: str) -> List[str]:
+        """Extract probable debtor words: 'do joao' / 'da ana' / before 'me pagou'."""
+        candidates: List[str] = []
+        norm = message.lower()
+
+        trig_pos = norm.find("me pag")
+        if trig_pos > 0:
+            before = message[:trig_pos].strip(" ,.-")
+            before = re.sub(r"^[Oo]sa?\s+", "", before).strip()
+            if before and re.search(r"[a-zA-ZÀ-ú]", before):
+                candidates.append(before)
+        for m2 in re.finditer(r"\b(?:do|da)\s+([A-Za-zÀ-ú]{2,20})\b", message,
+                              flags=re.IGNORECASE):
+            candidates.append(m2.group(1))
+
+        stop = {
+            "de", "do", "da", "dele", "deles", "dela", "delas", "que", "tem",
+            "recebi", "recebemos", "ganhei", "ganhamos", "salario", "salário",
+            "beneficio", "benefício", "freela", "bonus", "bônus", "vale",
+            "restaurante", "parte",
+        }
+        out: List[str] = []
+        for c in candidates:
+            first = _normalize_accentless(c).split()[0] if c.split() else ""
+            if first and first not in stop:
+                out.append(first)
+        return out[:3]
 
     def _determine_category_with_ai(self, description: str,
                                     hardcoded_expense_categories: List[str]) -> tuple:

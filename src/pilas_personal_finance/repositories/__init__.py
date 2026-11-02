@@ -111,7 +111,8 @@ class TransactionsRepo:
                payment_instrument_id: Optional[uuid.UUID], tx_type: str, scope: str,
                amount: float, description: Optional[str], transaction_date: str,
                competence_month: Optional[str], source: str, telegram_update_id: Optional[int] = None,
-               ai_category_confidence: Optional[float] = None) -> Dict[str, Any]:
+               ai_category_confidence: Optional[float] = None,
+               external_reference: Optional[str] = None) -> Dict[str, Any]:
         """Create a new transaction."""
         data = self.supabase.from_("transactions").insert({
             "user_id": str(user_id),
@@ -126,6 +127,7 @@ class TransactionsRepo:
             "source": source,
             "telegram_update_id": telegram_update_id,
             "ai_category_confidence": ai_category_confidence,
+            "external_reference": external_reference,
         }).execute()
         if data.data and len(data.data) > 0:
             return data.data[0]

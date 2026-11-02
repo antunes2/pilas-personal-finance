@@ -1011,7 +1011,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     supabase = get_supabase()
     service = TransactionService(supabase)
 
-    # Income messages ("Recebi 6500 de salário") get a dedicated path
+    # 1. Payment of an open receivable ("recebi 30 do joao", "joao me pagou 30")
+    #    must win BEFORE the generic income path, so it abates the debt.
+    norm_msg = message_text.lower()
+    has_payment_clue = (
+        service.is_income_message(message_text)
+        or any(t in norm_msg for t in ("me pagou", "me pagaram"))
+    )
+    if has_payment_clue:
+        pay = service.register_receivable_payment_by_message(
+            telegram_user_id, message_text, update.message.message_id
+        )
+        if pay:
+            rec = pay["receivable"]
+            pending = round(pay["original"] - pay["received_total"], 2)
+            lines = [
+                f"🤝 Recebimento abatido: R$ {_fmt_brl(pay['applied'])}"
+                f" de {rec['debtor_name']}"
+            ]
+            if pay["overpaid"] > 0:
+                lines.append(f"⚠️ Passou do valor da dívida"
+                             f" (R$ {_fmt_brl(pay['overpaid'])})"
+                             f" — excedente entrou como entrada comum.")
+            if pending <= 0:
+                lines.append(f"✅ Dívida de {rec['debtor_name']} quitada!"
+                             f" (R$ {_fmt_brl(pay['original'])})")
+            else:
+                lines.append(f"Falta receber: R$ {_fmt_brl(pending)}"
+                             f" (já recebi R$ {_fmt_brl(pay['received_total'])})")
+            await update.message.reply_text("\n".join(lines))
+            return
+
+    # 2. Receivable creation ("joao me deve 80 do jantar")
+    if service.is_receivable_message(message_text):
+        rec = service.register_receivable_message(
+            telegram_user_id, message_text, update.message.message_id
+        )
+        if rec:
+            await update.message.reply_text(
+                f"📌 Registrado a receber de {rec['debtor_name']}:"
+                f" R$ {rec['original_amount']:.2f} — {rec['description']}\n"
+                "Quando chegar: 'joão me pagou 30' ou 'recebi 30 do joão'"
+            )
+        else:
+            await update.message.reply_text(
+                "Não entendi. Formato: 'joão me deve 80 do jantar'"
+            )
+        return
+
+    # 3. Generic income messages ("Recebi 6500 de salário")
     if service.is_income_message(message_text):
         tx = service.register_income_message(
             telegram_user_id, message_text, update.message.message_id
