@@ -17,6 +17,7 @@ from pilas_personal_finance.bot.handlers import (
     pagar_command, receber_command, list_receivables_command,
     registrar_recebimento_command, orcamento_command,
     cartoes_command, categorias_command, relatorio_command,
+    resumo_command, analise_command,
 )
 from pilas_personal_finance.bot.keyboards import get_main_keyboard
 from supabase import create_client
