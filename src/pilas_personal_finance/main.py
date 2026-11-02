@@ -46,6 +46,8 @@ COMMAND_LIST = [
     ("cartoes", "Listar instrumentos de pagamento"),
     ("categorias", "Listar categorias válidas"),
     ("relatorio", "Relatório HTML (Fase 5 em breve)"),
+    ("resumo", "Resumo rápido do mês"),
+    ("analise", "Análise textual por IA"),
 ]
 
 
@@ -92,6 +94,8 @@ def main():
     application.add_handler(CommandHandler("cartoes", cartoes_command))
     application.add_handler(CommandHandler("categorias", categorias_command))
     application.add_handler(CommandHandler("relatorio", relatorio_command))
+    application.add_handler(CommandHandler("resumo", resumo_command))
+    application.add_handler(CommandHandler("analise", analise_command))
 
     # Central error handler
     application.add_error_handler(on_error)

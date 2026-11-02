@@ -729,6 +729,136 @@ async def categorias_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(text, reply_markup=get_main_keyboard())
 
 
+async def _report_data_args(context) -> tuple:
+    """Parse shared /resumo and /analise args: [casal] [2026-11|mes]"""
+    scope, month = "individual", None
+    for a in (context.args or []):
+        a = a.lower()
+        if a in ("casal", "consolidado", "conjunto"):
+            scope = "casal"
+        elif a in ("mes", "mês", "m", "atual", "current"):
+            continue
+        elif re.fullmatch(r"\d{4}-\d{2}", a):
+            month = a
+    return scope, month
+
+
+def _fmt_brl(v: float) -> str:
+    s = f"{v:,.2f}"
+    return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+async def resumo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick deterministic month-to-date summary (no AI)."""
+    user = update.effective_user
+    if not is_authorized(user.id, user.username):
+        await update.message.reply_text("Acesso negado.")
+        return
+
+    supabase = get_supabase()
+    scope, month = await _report_data_args(context)
+    try:
+        from pilas_personal_finance.services.report_service import (
+            collect_report_data, TZ_SAO_PAULO,
+        )
+        data = collect_report_data(
+            supabase, scope=scope, month=month, telegram_user_id=user.id
+        )
+    except ValueError:
+        await update.message.reply_text("Usuário não registrado. Use /start primeiro.")
+        return
+    except Exception:
+        logger.exception("resumo failed")
+        await update.message.reply_text("Erro ao montar o resumo. Tente novamente.")
+        return
+
+    label = data["month"].replace("-", "/")
+    lines = [
+        f"📊 Resumo {label} ({data['scope_label']})",
+        "",
+        f"Receitas realizadas: R$ {_fmt_brl(data['total_incomes'])}",
+        f"Despesas realizadas: R$ {_fmt_brl(data['total_expenses'])}",
+        f"Disponível agora: R$ {_fmt_brl(data['available_now'])}",
+        f"Livre projetado (após fixos pendentes): R$ {_fmt_brl(data['available_projected'])}",
+        "",
+        "🏦 Principais ofensores:",
+    ]
+    top = list(data["by_category"].items())[:3]
+    if top:
+        for name, total in top:
+            lines.append(f"  • {name}: R$ {_fmt_brl(total)}")
+    else:
+        lines.append("  (nenhum gasto registrado)")
+    lines += [
+        "",
+        f"⏳ Fixos pendentes: R$ {_fmt_brl(data['total_fixed_pending'])}"
+        f" ({len(data['fixed_pending']) + len(data['fixed_overdue'])} itens)"
+        + (f" — {len(data['fixed_overdue'])} atrasado(s)!" if data["fixed_overdue"] else ""),
+        f"🤝 A receber (incerto): R$ {_fmt_brl(data['receivables_pending'])}",
+        "",
+        "Análise com IA: /analise | Relatório completo: /relatorio",
+    ]
+    await update.message.reply_text("\n".join(lines), reply_markup=get_main_keyboard())
+
+
+async def analise_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick textual AI analysis of the month (update.message, not HTML)."""
+    user = update.effective_user
+    if not is_authorized(user.id, user.username):
+        await update.message.reply_text("Acesso negado.")
+        return
+
+    supabase = get_supabase()
+    scope, month = await _report_data_args(context)
+    try:
+        from pilas_personal_finance.services.report_service import (
+            collect_report_data, _summary_text_for_ai,
+        )
+        data = collect_report_data(
+            supabase, scope=scope, month=month, telegram_user_id=user.id
+        )
+    except ValueError:
+        await update.message.reply_text("Usuário não registrado. Use /start primeiro.")
+        return
+    except Exception:
+        logger.exception("analise failed")
+        await update.message.reply_text("Erro ao montar a análise. Tente novamente.")
+        return
+
+    label = data["month"].replace("-", "/")
+    status = await update.message.reply_text("🧠 Analisando com IA...")
+    try:
+        from pilas_personal_finance.services.ai_service import AIService
+        analysis = AIService().analyze_report(_summary_text_for_ai(data))
+    except Exception:
+        logger.exception("AI analysis failed")
+        analysis = None
+
+    if not analysis:
+        await status.edit_text(
+            "⚠️ Análise da IA indisponível agora — os números continuam no /resumo "
+            "e no /relatorio. Tente novamente em instantes."
+        )
+        return
+
+    titles = {
+        "observacoes": "📌 Observações",
+        "variacoes": "📈 Gastos relevantes",
+        "riscos": "⚠️ Riscos de estouro",
+        "recomendacoes": "💡 Recomendações",
+    }
+    lines = [f"🧠 Análise IA — {label} ({data['scope_label']})", ""]
+    for key, title in titles.items():
+        items = analysis.get(key) or []
+        if items:
+            lines.append(title)
+            lines += [f"• {i}" for i in items]
+            lines.append("")
+    await status.edit_text("\n".join(lines).strip())
+    await update.message.reply_text("📄 Relatório completo com números: /relatorio",
+                                    reply_markup=get_main_keyboard())
+
+
 async def relatorio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Generate the monthly HTML report and send it as a document.
 
