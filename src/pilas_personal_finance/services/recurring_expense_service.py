@@ -278,8 +278,18 @@ def calculate_budget_projection(
     ).execute()
     transactions = result.data or []
 
-    expenses = [t for t in transactions if t.get("type") == "EXPENSE"]
+    expenses = [
+        t for t in transactions
+        if t.get("type") == "EXPENSE" and t.get("is_card_invoice_payment") is not True
+    ]
+    invoice_payments = [
+        t for t in transactions
+        if t.get("type") == "EXPENSE" and t.get("is_card_invoice_payment") is True
+    ]
     income = [t for t in transactions if t.get("type") == "INCOME"]
+    # Invoice payments (is_card_invoice_payment) are cash transfers, NOT
+    # expenses - excluded to avoid double counting (the purchase already
+    # counted as expense at its own date).
     total_expenses_realized = sum(float(t.get("amount") or 0) for t in expenses)
     total_income_received = sum(float(t.get("amount") or 0) for t in income)
 

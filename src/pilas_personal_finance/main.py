@@ -17,7 +17,7 @@ from pilas_personal_finance.bot.handlers import (
     pagar_command, receber_command, list_receivables_command,
     registrar_recebimento_command, orcamento_command,
     cartoes_command, categorias_command, relatorio_command,
-    resumo_command, analise_command,
+    resumo_command, analise_command, salario_command, beneficios_command,
 )
 from pilas_personal_finance.bot.keyboards import get_main_keyboard
 from supabase import create_client
@@ -49,6 +49,8 @@ COMMAND_LIST = [
     ("relatorio", "Relatório HTML (Fase 5 em breve)"),
     ("resumo", "Resumo rápido do mês"),
     ("analise", "Análise textual por IA"),
+    ("salario", "Configurar salário bruto"),
+    ("beneficios", "Configurar benefício fixo"),
 ]
 
 
@@ -97,6 +99,8 @@ def main():
     application.add_handler(CommandHandler("relatorio", relatorio_command))
     application.add_handler(CommandHandler("resumo", resumo_command))
     application.add_handler(CommandHandler("analise", analise_command))
+    application.add_handler(CommandHandler("salario", salario_command))
+    application.add_handler(CommandHandler("beneficios", beneficios_command))
 
     # Central error handler
     application.add_error_handler(on_error)

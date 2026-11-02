@@ -54,6 +54,12 @@
     <div class="label">Disponível projetado</div>
     <div class="value amber">R$ {{ "%.2f"|format(available_projected) }}</div>
   </div>
+  {% if total_invoice_payments %}
+  <div class="card">
+    <div class="label">Faturas pagas (caixa, não-despesa)</div>
+    <div class="value blue">R$ {{ "%.2f"|format(total_invoice_payments) }}</div>
+  </div>
+  {% endif %}
 </div>
 <p class="uncertain">⚠️ <strong>A receber (incerto, não conta como dinheiro):
 R$ {{ "%.2f"|format(receivables_pending) }}</strong> — este valor depende de pagamento e

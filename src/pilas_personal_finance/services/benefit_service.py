@@ -102,7 +102,42 @@ def calculate_benefit_by_day(
     }
 
 
-def calculate_irrrf(salary_bruto: float, dependents: int = 0) -> Dict[str, Any]:
+INSS_TABLE_2025 = [
+    # (teto da faixa, alíquota) - tabelas versionadas, vigência 2025
+    (1518.00, 0.075),
+    (2793.88, 0.09),
+    (4190.83, 0.12),
+    (8157.41, 0.14),
+]
+
+INSS_FLOOR_2025 = 78.79  # contribuição mínima sobre 1 salário mínimo
+
+
+def calculate_inss(salary_bruto: float) -> float:
+    """INSS progressivo (tabela 2025). Determinístico, nunca IA.
+
+    Salário acima do teto paga a contribuição máxima (sobre 8157,41).
+    """
+    if salary_bruto <= 0:
+        return 0.0
+    if salary_bruto >= INSS_TABLE_2025[-1][0]:
+        return round(sum(
+            (ceiling - (0.0 if i == 0 else INSS_TABLE_2025[i - 1][0])) * rate
+            for i, (ceiling, rate) in enumerate(INSS_TABLE_2025)
+        ), 2)
+    total = 0.0
+    prev_ceiling = 0.0
+    for ceiling, rate in INSS_TABLE_2025:
+        if salary_bruto <= ceiling:
+            total += (salary_bruto - prev_ceiling) * rate
+            break
+        total += (ceiling - prev_ceiling) * rate
+        prev_ceiling = ceiling
+    return round(max(total, 0.0), 2)
+
+
+def calculate_irrrf(salary_bruto: float, dependents: int = 0,
+                    inss_deduction: Optional[float] = None) -> Dict[str, Any]:
     """
     Calcula estimativa de IRRF (Imposto de Renda Retido na Fonte).
     
@@ -115,16 +150,15 @@ def calculate_irrrf(salary_bruto: float, dependents: int = 0) -> Dict[str, Any]:
     - De R$ 2.826,66 a R$ 3.751,05: 15% - dedução R$ 354,80
     - De R$ 3.751,06 a R$ 4.664,68: 22,5% - dedução R$ 636,13
     - Acima de R$ 4.664,68: 27,5% - dedução R$ 896,00
-    
+
     Note: Tabelas são simplificadas e atualizadas anualmente.
     """
-    
+
     if salary_bruto <= 0:
         return {"irrf": 0, "irrf_base": 0, "is_isento": True}
-    
-    # Base de cálculo = salário bruto - INSS (simplificado)
-    # Em um cálculo completo, descontar INSS antes de calcular IRRF
-    irrf_base = salary_bruto
+
+    # Base de cálculo = salário bruto - INSS (quando informado)
+    irrf_base = salary_bruto - (inss_deduction or 0)
     
     is_isento = irrf_base <= 1903.98
     

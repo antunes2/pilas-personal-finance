@@ -919,6 +919,73 @@ async def relatorio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     os.remove(path)
 
 
+async def salario_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set the salary profile: /salario <bruto> [dependentes]"""
+    user = update.effective_user
+    if not is_authorized(user.id, user.username):
+        await update.message.reply_text("Acesso negado.")
+        return
+    args = context.args or []
+    if not args or not re.fullmatch(r"\d+[.,]?\d*", args[0].replace(",", ".")):
+        await update.message.reply_text(
+            "Uso: /salario 6500 [dependentes]\n"
+            "Ex: /salario 6500 | /salario 6500 0"
+        )
+        return
+    bruto = float(args[0].replace(",", "."))
+    deps = int(args[1]) if len(args) > 1 and args[1].isdigit() else 0
+
+    supabase = get_supabase()
+    app_user = AppUsersRepo(supabase).find_by_telegram_id(user.id)
+    if not app_user:
+        await update.message.reply_text("Usuário não registrado. Use /start primeiro.")
+        return
+
+    from pilas_personal_finance.services.profile_service import upsert_salary_profile
+    out = upsert_salary_profile(supabase, app_user["id"], bruto, deps)
+    c = out["calc"]
+    await update.message.reply_text(
+        "✅ Perfil salarial salvo (1º dia útil do mês):\n"
+        f"Bruto: R$ {c['bruto']:.2f} | INSS: -R$ {c['inss']:.2f} | "
+        f"IRRF: -R$ {c['irrf']:.2f}\n"
+        f"→ Líquido de referência: R$ {c['net']:.2f}\n"
+        "(estimativa com tabelas 2025; o real é o que você lança)",
+        reply_markup=get_main_keyboard(),
+    )
+
+
+async def beneficios_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set fixed monthly benefit: /beneficios <valor> [dia_de_credito]"""
+    user = update.effective_user
+    if not is_authorized(user.id, user.username):
+        await update.message.reply_text("Acesso negado.")
+        return
+    args = context.args or []
+    if not args or not re.fullmatch(r"\d+[.,]?\d*", args[0].replace(",", ".")):
+        await update.message.reply_text(
+            "Uso: /beneficios 1220 [dia]\n"
+            "Sem dia → projetado no fim do mês. Ex: /beneficios 1220"
+        )
+        return
+    amount = float(args[0].replace(",", "."))
+    credit_day = int(args[1]) if len(args) > 1 and args[1].isdigit() and 1 <= int(args[1]) <= 31 else None
+
+    supabase = get_supabase()
+    app_user = AppUsersRepo(supabase).find_by_telegram_id(user.id)
+    if not app_user:
+        await update.message.reply_text("Usuário não registrado. Use /start primeiro.")
+        return
+
+    from pilas_personal_finance.services.profile_service import upsert_fixed_benefit
+    upsert_fixed_benefit(supabase, app_user["id"], amount, credit_day)
+    when = f"dia {credit_day} de cada mês" if credit_day else "sem data fixa (projetado no fim do mês)"
+    await update.message.reply_text(
+        f"✅ Benefício fixo salvo: R$ {amount:.2f} — {when}.\n"
+        "Ao receber de verdade, mande: 'recebi 1220 de benefício'",
+        reply_markup=get_main_keyboard(),
+    )
+
+
 async def orcamento_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /orcamento command.
 
@@ -955,13 +1022,44 @@ async def orcamento_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     receiveables_pending = projection["receiveables_pending"]
     total_incomes = _income_line(supabase, app_user["id"], current_month)
 
+    from pilas_personal_finance.services.cashflow_service import build_cashflow_summary
+    try:
+        cf = build_cashflow_summary(supabase, app_user["id"], current_month)
+        cash_available = cf["cash_now"]
+        card_future = cf["card_in_current_month"]
+        expected_lines = [
+            f"   • {e['label']}: R$ {e['amount']:.2f} em {e['expected_date']}"
+            for e in cf["expected_income_events"]
+        ] or ["   • (nenhuma entrada esperada restante neste mês)"]
+    except Exception:
+        logger.exception("cashflow summary failed")
+        cash_available = available_now
+        card_future, expected_lines = None, []
+
     text = f"📊 Orçamento de {current_month}\n\n"
-    text += f"🟢 Disponível agora: R$ {available_now:.2f}\n"
-    text += f"   (valores efetivamente recebidos e gastos confirmados)\n\n"
+    if card_future is not None:
+        text += "💵 CAIXA (apenas dinheiro de verdade)\n"
+        text += f"   • Recebido: R$ {cf['received_income']:.2f}\n"
+        text += f"   • Gastos à vista (débito/pix/boleto): -R$ {cf['cash_out']:.2f}\n"
+        if cf["invoices_paid_month"] > 0:
+            text += f"   • Faturas pagas neste mês: -R$ {cf['invoices_paid_month']:.2f}\n"
+        text += f"   → Caixa agora: R$ {cash_available:.2f}\n\n"
+        text += "💳 CARTÃO (fatura futura)\n"
+        text += f"   • No cartão neste mês: R$ {card_future:.2f}\n"
+        text += "   (não tirou dinheiro da conta; pagará no próximo payday)\n\n"
+        text += "🟢 Projetado após pagar a próxima fatura:\n"
+        text += f"   R$ {cf['projected_after_next_invoice']:.2f}\n"
+        text += "   Entradas ainda esperadas:\n"
+        text += "\n".join(expected_lines) + "\n"
+        text += f"   Fixos pendentes: -R$ {cf['fixed_pending']:.2f}\n\n"
+    else:
+        text += f"🟢 Disponível agora: R$ {available_now:.2f}\n"
+        text += "   (valores efetivamente recebidos e gastos confirmados)\n"
+
     text += f"🟡 Disponível projetado até o fim do mês: R$ {available_projected:.2f}\n"
-    text += f"   (abate custos fixos ainda pendentes)\n\n"
+    text += "   (abate custos fixos ainda pendentes)\n\n"
     text += f"🔵 Cenário incluindo recebíveis: R$ {available_projected + receiveables_pending:.2f}\n"
-    text += f"   (incerto - recebíveis NÃO são dinheiro confirmado)\n\n"
+    text += "   (incerto - recebíveis NÃO são dinheiro confirmado)\n\n"
     text += "📊 Resumo:\n"
     text += f"   • Total de receitas recebidas: R$ {total_incomes:.2f}\n"
     text += f"   • Total de despesas realizadas: R$ {projection['total_expenses_realized']:.2f}\n"
@@ -1011,9 +1109,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     supabase = get_supabase()
     service = TransactionService(supabase)
 
+    # 0. Card invoice payment ("paguei a fatura do nubank 2500") - cash out,
+    #    NOT an expense; must win before income/expense paths.
+    norm_msg = message_text.lower()
+    if "fatura" in norm_msg and re.search(r"\bpag(uei|o|ou)\b|\bquit(ei|ou)\b", norm_msg) \
+            and re.search(r"\d", norm_msg):
+        from pilas_personal_finance.services.cashflow_service import register_invoice_payment
+        app_user = AppUsersRepo(supabase).find_by_telegram_id(telegram_user_id)
+        if app_user:
+            inv = register_invoice_payment(
+                supabase, app_user["id"], message_text,
+                update.message.message_id, datetime.now(TZ_SAO_PAULO),
+            )
+            if inv:
+                await update.message.reply_text(
+                    f"💳 Fatura paga: R$ {_fmt_brl(inv['amount'])} — {inv['card_name']}\n"
+                    "(saída de caixa, NÃO soma em despesas - a compra já\n"
+                    "foi contada na data da compra)\n"
+                    f"Competência: {inv['invoice_month_ref']}"
+                )
+                return
+        # unparseable invoice message falls through to expense flow
+
     # 1. Payment of an open receivable ("recebi 30 do joao", "joao me pagou 30")
     #    must win BEFORE the generic income path, so it abates the debt.
-    norm_msg = message_text.lower()
     has_payment_clue = (
         service.is_income_message(message_text)
         or any(t in norm_msg for t in ("me pagou", "me pagaram"))

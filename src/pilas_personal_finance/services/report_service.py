@@ -79,7 +79,12 @@ def collect_report_data(
     for t in all_tx:
         t["_user_name"] = user_names.get(t.get("user_id"), "?")
 
-    expenses = [t for t in all_tx if t.get("type") == "EXPENSE"]
+    expenses = [t for t in all_tx
+                if t.get("type") == "EXPENSE"
+                and t.get("is_card_invoice_payment") is not True]
+    invoice_payments = [t for t in all_tx
+                        if t.get("type") == "EXPENSE"
+                        and t.get("is_card_invoice_payment") is True]
     incomes = [t for t in all_tx if t.get("type") == "INCOME"]
 
     def _sum(rows):
@@ -172,6 +177,7 @@ def collect_report_data(
         "users": [user_names[u["id"]] for u in target_users],
         "total_incomes": total_incomes,
         "total_expenses": total_expenses,
+        "total_invoice_payments": round(sum(float(t["amount"]) for t in invoice_payments), 2),
         "by_category": by_category,
         "by_person": by_person,
         "by_instrument": by_instrument,
