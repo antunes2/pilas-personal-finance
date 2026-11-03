@@ -93,4 +93,6 @@ Never claim that a test passed if it was not executed.
 - /ia_status /ia_limite /ia_uso; budget in app_settings (AI_MONTHLY_LIMIT_BRL)
 - over-limit guard in classification + report analysis (local rules fallback)
 - one-shot 50/80/100% alerts (persisted flags); month filter fixed
-### Phase 7 — Importação CSV (pending)
+### Phase 7 — Importação CSV ✅
+- /import via CSV attachment caption; staged preview; /import_confirm /import_cancel
+- Nubank/generic layouts; dupe triple check; 1 MB/500 rows guard; source=CSV_IMPORT

@@ -5,6 +5,7 @@ Contains /start, /ajuda, /adicionar, /fixos, /orcamento, /receber and natural me
 
 import re
 import os
+import io
 import logging
 from datetime import datetime
 from typing import Optional, List
@@ -1074,6 +1075,98 @@ async def beneficios_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "Ao receber de verdade, mande: 'recebi 1220 de benefício'",
         reply_markup=get_main_keyboard(),
     )
+
+
+async def handle_csv_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """CSV attached by Telegram with caption starting '/import'.
+
+    Spec Phase 7: validate + identify columns + preview + duplicates +
+    explicit confirmation before saving.
+    """
+    user = update.effective_user
+    doc = update.message.document
+    caption = (update.message.caption or "").strip()
+    if not is_authorized(user.id, user.username):
+        await update.message.reply_text("Acesso negado.")
+        return
+    if not caption:
+        return
+    cmd = caption.split()[0].lower()
+    if not (cmd == "/import" or cmd.startswith("/import@")):
+        return
+
+    parts = caption.split()
+    bank_hint = " ".join(parts[1:])[:24] if len(parts) > 1 else "cartão"
+
+    file = await context.bot.get_file(doc.file_id)
+    buf = io.BytesIO()
+    await file.download_to_drive(buf)
+    data = buf.getvalue()
+
+    from pilas_personal_finance.services import import_service
+    try:
+        st = import_service.stage_import(update.effective_chat.id, data, bank_hint)
+    except import_service.ImportError_ as e:
+        await update.message.reply_text(f"❌ {e}")
+        return
+    except Exception:
+        logger.exception("csv stage failed")
+        await update.message.reply_text("Erro ao ler o arquivo. Tente novamente.")
+        return
+
+    rows = st["rows"]
+    preview = rows[:3]
+    lines = [f"📥 {st['bank']}: {len(rows)} movimentos"]
+    lines.append("")
+    for r in preview:
+        lines.append(f"  {r['date']}: R$ {_fmt_brl(r['amount'])} — {r['title']}")
+    if len(rows) > 3:
+        lines.append(f"  ... e mais {len(rows) - 3}")
+    if st["bad_dates"]:
+        lines.append(f"⚠️ {st['bad_dates']} datas fora do padrão")
+    lines.append("")
+    lines.append("Confirmar gravação: /import_confirm")
+    lines.append("Descartar: /import_cancel")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def import_confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_authorized(user.id, user.username):
+        await update.message.reply_text("Acesso negado.")
+        return
+    supabase = get_supabase()
+    app_user = AppUsersRepo(supabase).find_by_telegram_id(user.id)
+    if not app_user:
+        await update.message.reply_text("Usuário não registrado. Use /start primeiro.")
+        return
+    from pilas_personal_finance.services import import_service
+    try:
+        out = import_service.commit_import(
+            supabase, app_user["id"], update.effective_chat.id,
+            update.message.message_id,
+        )
+    except import_service.ImportError_ as e:
+        await update.message.reply_text(f"❌ {e}")
+        return
+    except Exception:
+        logger.exception("commit import failed")
+        await update.message.reply_text("Erro ao gravar. Veja /ledger para conferir.")
+        return
+    await update.message.reply_text(
+        f"✅ Importado: {out['saved']} transações em '{out['instrument']}'\n"
+        f"⏭️ Duplicatas ignoradas: {out['skipped']}\n"
+        "Categorias ficam 'Outros' - classifique com IA natural:\n"
+        "mande 'corrigir' depois ou digite /analise"
+    )
+
+
+async def import_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from pilas_personal_finance.services import import_service
+    if import_service.discard(update.effective_chat.id):
+        await update.message.reply_text("🚫 Importação descartada.")
+    else:
+        await update.message.reply_text("Nada em aberto.")
 
 
 async def alvo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

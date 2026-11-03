@@ -20,6 +20,7 @@ from pilas_personal_finance.bot.handlers import (
     resumo_command, analise_command, salario_command, beneficios_command,
     alvo_command, compartilhados_command, ledger_command,
     ia_status_command, ia_limite_command, ia_uso_command,
+    handle_csv_import, import_confirm_command, import_cancel_command,
 )
 from pilas_personal_finance.bot.keyboards import get_main_keyboard
 from supabase import create_client

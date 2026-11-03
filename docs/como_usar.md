@@ -87,6 +87,12 @@
 - `/ia_limite 20` define o orçamento; alertas em 50/80/100%; ao 100%
   a IA pausa e o bot registra por regras locais (nunca bloqueia registro)
 
+### /import (CSV do banco/cartão - Fase 7)
+- Anexe o CSV ao Telegram com a legenda: `/import Nubank`
+- Prévia + contagem + `/import_confirm` para gravar ou `/import_cancel`
+- Duplicatas (mesma data+valor+descrição) são ignoradas; limite 1 MB
+- Gastos entram como EXPENSE no instrumento do banco; categoria 'Outros'
+
 ## Registro de Transações Naturais
 
 O bot aceita mensagens sem necessidade de comandos. Basta escrever:
