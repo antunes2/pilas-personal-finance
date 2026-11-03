@@ -230,6 +230,14 @@ INSTRUÇÕES:
         if not self.api_key:
             return None
 
+        try:
+            from pilas_personal_finance.services.ai_usage_service import AIUsageService
+            if AIUsageService().ai_over_limit():
+                logger.info("AI analysis skipped: monthly AI budget reached")
+                return None
+        except Exception:
+            logger.exception("ai_over_limit check failed; analysis proceeds")
+
         prompt = (
             "Você é um analista financeiro responsável por comentar um relatório mensal.\n"
             "Baseie-se SOMENTE nos dados fornecidos. Não invente números.\n"

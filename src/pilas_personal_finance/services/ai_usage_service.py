@@ -8,7 +8,7 @@ import os
 import json
 import logging
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 from supabase import create_client
 
 from dotenv import load_dotenv
@@ -102,17 +102,17 @@ class AIUsageService:
         )
 
         # Build query
-        query = supabase.from_("ai_usage").select(
-            "*, count(*)", count="exact"
-        )
+        query = supabase.from_("ai_usage").select("*")
 
         if operation:
             query = query.eq("operation", operation)
 
-        # Filter by month - simplified: last 30 days
-        # In production, would use proper date filtering
         if not month:
             month = datetime.now().strftime("%Y-%m")
+        import calendar
+        y, m = int(month[:4]), int(month[5:7])
+        query = query.gte("created_at", f"{month}-01T00:00:00").lte(
+            "created_at", f"{month}-{calendar.monthrange(y, m)[1]:02d}T23:59:59")
 
         try:
             result = query.execute()
@@ -146,4 +146,106 @@ class AIUsageService:
                 "total_cost_brl": 0.0,
                 "breakdown": {},
                 "period": month,
-            }
+            }    # ------------------------------------------------------------------
+    # AI budget monitoring (Phase 6 - spec §10)
+    # ------------------------------------------------------------------
+
+    LIMIT_KEY = "AI_MONTHLY_LIMIT_BRL"
+
+    def get_limit_brl(self) -> Optional[float]:
+        """Monthly AI budget from app_settings (docs/0011). None = no limit."""
+        try:
+            r = self.supabase.from_("app_settings").select("setting_value").eq(
+                "setting_key", self.LIMIT_KEY).limit(1).execute()
+            rows = r.data or []
+            if rows and rows[0].get("setting_value"):
+                return float(rows[0]["setting_value"])
+            return None
+        except Exception as e:
+            logger.warning(f"get_limit_brl failed: {e}")
+            return None
+
+    def set_limit_brl(self, value: Optional[float]) -> None:
+        existing = self.supabase.from_("app_settings").select("id").eq(
+            "setting_key", self.LIMIT_KEY).limit(1).execute()
+        payload = {"setting_value": str(value) if value is not None else None}
+        if existing.data:
+            self.supabase.from_("app_settings").update(payload).eq(
+                "id", existing.data[0]["id"]).execute()
+        else:
+            self.supabase.from_("app_settings").insert({
+                "setting_key": self.LIMIT_KEY,
+                "setting_value": str(value) if value is not None else None,
+            }).execute()
+
+    def ai_over_limit(self) -> bool:
+        """True if monthly costs already reached the configured limit."""
+        limit = self.get_limit_brl()
+        if not limit or limit <= 0:
+            return False
+        try:
+            usage = self.get_monthly_usage()
+            return (usage.get("total_cost_brl") or 0) >= limit
+        except Exception:
+            logger.exception("ai_over_limit failed")
+            return False
+
+    ALERT_LEVELS = (50, 80, 100)
+
+    def check_threshold_alerts(self) -> List[str]:
+        """Return newly crossed alert levels (50/80/100). Persisted flags in
+        app_settings make alerts one-shot even across restarts."""
+        limit = self.get_limit_brl()
+        if not limit or limit <= 0:
+            return []
+        try:
+            usage = self.get_monthly_usage()
+            triggered: List[str] = []
+            for lvl in self.ALERT_LEVELS:
+                flag_key = f"AI_ALERT_{lvl}_{datetime.now().strftime('%Y-%m')}"
+                marked = self.supabase.from_("app_settings").select("id").eq(
+                    "setting_key", flag_key).limit(1).execute()
+                if marked.data:
+                    continue
+                if (usage.get("total_cost_brl") or 0) >= limit * lvl / 100:
+                    self.supabase.from_("app_settings").insert({
+                        "setting_key": flag_key,
+                        "setting_value": "1",
+                    }).execute()
+                    triggered.append(
+                        f"⚠️ IA atingiu {lvl}% do orçamento mensal "
+                        f"(R$ {usage.get('total_cost_brl', 0):.2f}/{limit:.2f})"
+                    )
+            return triggered
+        except Exception:
+            logger.exception("check_threshold_alerts failed")
+            return []
+
+    def get_usage_details(self, month: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """/ia_uso breakdown: by operation and by model (small tables)."""
+        if not month:
+            month = datetime.now().strftime("%Y-%m")
+        import calendar
+        y, m = int(month[:4]), int(month[5:7])
+        try:
+            rows = self.supabase.from_("ai_usage").select("*").gte(
+                "created_at", f"{month}-01T00:00:00").lte(
+                "created_at", f"{month}-{calendar.monthrange(y, m)[1]:02d}T23:59:59"
+            ).order("created_at", desc=True).limit(200).execute().data or []
+            by_op: Dict[str, Dict[str, Any]] = {}
+            by_model: Dict[str, Dict[str, Any]] = {}
+            for r in rows:
+                op = r.get("operation") or "?"
+                model = r.get("model") or "?"
+                for bucket, key in ((by_op, op), (by_model, model)):
+                    b = bucket.setdefault(key, {"count": 0, "cost_brl": 0.0,
+                                                "input": 0, "output": 0})
+                    b["count"] += 1
+                    b["cost_brl"] += float(r.get("estimated_cost_brl") or 0)
+                    b["input"] += int(r.get("input_tokens") or 0)
+                    b["output"] += int(r.get("output_tokens") or 0)
+            return {"month": month, "by_operation": by_op, "by_model": by_model,
+                    "recent": rows[:10]}
+        except Exception as e:
+            logger.error(f"get_usage_details failed: {e}")
+            return None

@@ -82,6 +82,11 @@
 - `paguei a fatura do nubank 2500` → saída de CAIXA, não despesa
 - Gastos no cartão contam na data da compra (sem duplicar)
 
+### /ia_status, /ia_limite, /ia_uso
+- Monitoramento de IA: consumo do mês vs orçamento, % do limite
+- `/ia_limite 20` define o orçamento; alertas em 50/80/100%; ao 100%
+  a IA pausa e o bot registra por regras locais (nunca bloqueia registro)
+
 ## Registro de Transações Naturais
 
 O bot aceita mensagens sem necessidade de comandos. Basta escrever:

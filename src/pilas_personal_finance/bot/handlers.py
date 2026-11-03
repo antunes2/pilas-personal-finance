@@ -748,6 +748,96 @@ def _fmt_brl(v: float) -> str:
     return s.replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+async def ia_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """AI consumption this month vs limit (spec §10)."""
+    user = update.effective_user
+    if not is_authorized(user.id, user.username):
+        await update.message.reply_text("Acesso negado.")
+        return
+    service = TransactionService(get_supabase())
+    usage = service.ai_usage.get_monthly_usage()
+    limit = service.ai_usage.get_limit_brl()
+    lines = ["🧠 Uso da IA — " + usage["period"].replace("-", "/"), ""]
+    lines.append(f"Operações: {usage['total_operations']}")
+    toks = (f"Tokens: {usage['total_input_tokens']:,} entrada /"
+            f" {usage['total_output_tokens']:,} saída")
+    lines.append(toks.replace(",", "."))
+    lines.append(f"Custo do mês: R$ {_fmt_brl(usage.get('total_cost_brl') or 0)}")
+    if limit:
+        pct = (usage.get("total_cost_brl") or 0) / limit * 100
+        status = ("🔴 alcançado" if pct >= 100 else
+                  "🟠 com alertas" if pct >= 50 else "🟢 ok")
+        lines.append("")
+        lines.append(f"Orçamento: {_fmt_brl(limit)} → {min(pct, 999):.1f}% {status}")
+        if service.ai_usage.ai_over_limit():
+            lines.append("(IA desativada por limite; registros seguem"
+                         " por regras locais)")
+    else:
+        lines.append("")
+        lines.append("Orçamento não configurado (/ia_limite 20)")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def ia_limite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set AI monthly budget (BRL): /ia_limite 20 | /ia_limite 0 removes."""
+    user = update.effective_user
+    if not is_authorized(user.id, user.username):
+        await update.message.reply_text("Acesso negado.")
+        return
+    args = context.args or []
+    if not args:
+        cur = TransactionService(get_supabase()).ai_usage.get_limit_brl()
+        await update.message.reply_text(
+            "Orçamento atual de IA: "
+            + (f"R$ {_fmt_brl(cur)}" if cur is not None else "não configurado")
+            + "\nDefinir: /ia_limite 20 | Remover: /ia_limite 0"
+        )
+        return
+    raw = args[0].replace(",", ".")
+    if not re.fullmatch(r"\d+(\.\d+)?", raw):
+        await update.message.reply_text("Uso: /ia_limite 20")
+        return
+    value = float(raw)
+    try:
+        service = TransactionService(get_supabase())
+        service.ai_usage.set_limit_brl(value if value > 0 else None)
+    except Exception:
+        logger.exception("ia_limite save failed")
+        await update.message.reply_text("Não consegui salvar o limite.")
+        return
+    await update.message.reply_text(
+        "🧠 Orçamento de IA removido (sem limite)." if value <= 0 else
+        f"🧠 Orçamento de IA salvo: R$ {_fmt_brl(value)}/mês.\n"
+        "Alertas em 50/80/100%. Ao 100%: IA pausa e o registro segue por regras locais."
+    )
+
+
+async def ia_uso_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Usage history by operation/model (spec §10)."""
+    user = update.effective_user
+    if not is_authorized(user.id, user.username):
+        await update.message.reply_text("Acesso negado.")
+        return
+    service = TransactionService(get_supabase())
+    d = service.ai_usage.get_usage_details()
+    if not d:
+        await update.message.reply_text("Sem dados de uso ainda.")
+        return
+    lines = [f"🧠 Uso por operação — {d['month'].replace('-', '/')}"]
+    for op, b in (d.get("by_operation") or {}).items():
+        toks = f"  {op}: {b['count']}x | R$ {_fmt_brl(b['cost_brl'])} | {b['input']:,}+{b['output']:,} tok"
+        lines.append(toks.replace(",", "."))
+    lines.append("")
+    lines.append("Por modelo:")
+    models = d.get("by_model") or {}
+    if models:
+        lines += [f"  {m}: {b['count']}x | R$ {_fmt_brl(b['cost_brl'])}"
+                  for m, b in models.items()]
+    else:
+        lines.append("  (nenhum uso registrado)")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def resumo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick deterministic month-to-date summary (no AI)."""
     user = update.effective_user
@@ -1353,6 +1443,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if occ:
             reply += "\n✅ Despesa fixa: ocorrência marcada como paga."
         await update.message.reply_text(reply)
+
+        # AI budget alerts (one-shot 50/80/100, spec §10)
+        try:
+            alerts = service.ai_usage.check_threshold_alerts()
+            for a in alerts:
+                await update.message.reply_text(a)
+        except Exception:
+            logger.exception("threshold alerts failed")
     else:
         # Ask for clarification
         await update.message.reply_text(

@@ -518,6 +518,18 @@ class TransactionService:
         Returns:
             Tuple of (category_dict, ai_usage_record_or_None)
         """
+        # AI budget guard (spec §10): cost reached limit -> local rules only.
+        # Never blocks the financial registration itself.
+        try:
+            if self.ai_usage.ai_over_limit():
+                self.ai_disabled_by_limit = True
+                category = self._resolve_category_hardcoded(
+                    description, hardcoded_expense_categories)
+                return category, None
+            self.ai_disabled_by_limit = False
+        except Exception:
+            logger.exception("ai_over_limit check failed; AI stays enabled")
+
         # Try AI classification first
         ai_result = self.ai_service.classify(description, hardcoded_expense_categories)
 

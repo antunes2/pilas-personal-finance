@@ -89,5 +89,8 @@ Never claim that a test passed if it was not executed.
 ### Phase 5 — Análises e relatório HTML ✅
 - /relatorio [mes|individual|casal|2026-11], fixed template, AI JSON validated
 
-### Phase 6 — Monitoramento de IA (pending)
+### Phase 6 — Monitoramento de IA ✅
+- /ia_status /ia_limite /ia_uso; budget in app_settings (AI_MONTHLY_LIMIT_BRL)
+- over-limit guard in classification + report analysis (local rules fallback)
+- one-shot 50/80/100% alerts (persisted flags); month filter fixed
 ### Phase 7 — Importação CSV (pending)
