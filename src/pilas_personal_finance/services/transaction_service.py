@@ -6,6 +6,8 @@ Keep these free of Telegram-specific code where possible.
 
 import uuid
 import logging
+
+logger = logging.getLogger(__name__)
 import unicodedata
 from typing import Optional, List, Dict, Any
 import re
@@ -171,7 +173,15 @@ class TransactionService:
         """
 
         # 1. Parse the message
-        parsed = self._parse_message(message)
+        # Scope tokens ("do casal") live between value and instrument, which
+        # breaks the message regex - strip them before parsing.
+        parcels = self._detect_installments(message)
+        per_parcel = bool(re.search(r"\b\d+\s*[xX]\s+de\b", message))
+        msg_to_parse = message
+        if parcels:
+            msg_to_parse = self._strip_installment_tokens(msg_to_parse)
+        msg_to_parse = self._strip_scope_tokens(msg_to_parse)
+        parsed = self._parse_message(msg_to_parse)
         if not parsed:
             return None
 
@@ -179,6 +189,10 @@ class TransactionService:
         description = parsed["description"]
         instrument_name = parsed["instrument_name"]
         instrument_type = parsed["instrument_type"]  # 'crédito', 'débito', 'Pix'
+
+        # "3x de 500" -> 500 is the PARCEL value; total = 500*3
+        if per_parcel and parcels:
+            value = round(value * parcels, 2)
 
         # 2. Find or create the user
         user = self.users_repo.find_by_telegram_id(telegram_user_id)
@@ -203,13 +217,24 @@ class TransactionService:
         # 5. Parse date - use today if not specified
         tx_date = self._parse_date(message)
 
+        # 5.5 Shared-spend flag ("do casal", "conjunto") - both benefit
+        scope = "SHARED" if self._has_shared_scope(message, description) else "PERSONAL"
+
+        # 5.6 Installments ("notebook 1500 em 3x no nubank credito"):
+        # total price is value; N parcels registered into future months now
+        if parcels and instrument_type in ("crédito", "credito", "parcelado"):
+            return self._register_parcel_purchase(
+                user, category, instrument, description, scope,
+                value, parcels, telegram_update_id,
+            )
+
         # 6. Create the transaction
         tx = self.transactions_repo.create(
             user_id=uuid.UUID(user["id"]),
             category_id=self._resolve_category_db_id(category),
             payment_instrument_id=uuid.UUID(instrument["id"]) if instrument.get("id") else None,
             tx_type="EXPENSE",
-            scope="PERSONAL",
+            scope=scope,
             amount=value,
             description=description,
             transaction_date=tx_date,
@@ -651,7 +676,7 @@ class TransactionService:
 
         # Try full pattern: ^(.+?)\s+(\d+\.?\d*)\s+(no|em)\s+(.+?)(?:\s+(crédito|débito|Pix))?$
         # This captures instrument_name as everything after "no"/"em" up to optional type
-        regex_full = r'^(.+?)\s+(\d+\.?\d*)\s+(no|em)\s+(.+?)(?:\s+(crédito|débito|Pix))?$'
+        regex_full = r'^(.+?)\s+(\d+\.?\d*)\s+(no|em)\s+(.+?)(?:\s+(crédito|credito|débito|debito|Pix|pix))?$'
         match = re.match(regex_full, msg)
 
         if not match:
@@ -763,3 +788,97 @@ class TransactionService:
         tz = pytz.timezone("America/Sao_Paulo")
         now = datetime.now(tz)
         return now.strftime("%Y-%m-%d")
+    # ------------------------------------------------------------------
+    # Shared scope ("o que é gasto pra casa, ambos se beneficiam")
+    # ------------------------------------------------------------------
+
+    def _strip_installment_tokens(self, message: str) -> str:
+        """Remove parcel tokens ('em 3x', 'em 3 parcelas', '3x de') so the
+        value+instrument parser stays intact."""
+        clean = re.sub(r"\bem\s+\d+\s*[xX]\b", " ", message)
+        clean = re.sub(r"\bem\s+\d+\s*parcelas?\b", " ", clean, flags=re.IGNORECASE)
+        clean = re.sub(r"\b\d+\s*[xX]\s+de\b", "de", clean)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        return clean
+
+    def _detect_installments(self, message: str) -> int:
+        """'1500 em 3x' / '3 parcelas' -> N parcels (N>=2). 74x like '2500' must not match."""
+        norm = _normalize_accentless(message).lower()
+        m = re.search(r"(\d+)\s*x\b", norm)
+        if m:
+            n = int(m.group(1))
+            if 2 <= n <= 48:
+                return n
+        m = re.search(r"(\d+)\s*parcelas?", norm)
+        if m:
+            n = int(m.group(1))
+            if 2 <= n <= 48:
+                return n
+        return 0
+
+    def _register_parcel_purchase(self, user, category, instrument, description,
+                                  scope, total_value, parcels,
+                                  telegram_update_id) -> Dict[str, Any]:
+        """Create one EXPENSE transaction per month (purchase + future
+        installments in following months, on the same day of month).
+
+        Deterministic - no AI. The invoice of month M includes parcel M;
+        cash axis handles payment timing automatically.
+        """
+        import calendar
+        from datetime import datetime, timedelta
+        import pytz
+
+        tz = pytz.timezone("America/Sao_Paulo")
+        base_date = datetime.now(tz).date()
+        parcel_amount = round(total_value / parcels, 2)
+        created = []
+
+        for i in range(parcels):
+            y = base_date.year
+            m = base_date.month + i
+            while m > 12:
+                m -= 12
+                y += 1
+            last_day = calendar.monthrange(y, m)[1]
+            day = min(base_date.day, last_day)
+            tx = self.transactions_repo.create(
+                user_id=uuid.UUID(user["id"]),
+                category_id=self._resolve_category_db_id(category),
+                payment_instrument_id=uuid.UUID(instrument["id"]) if instrument.get("id") else None,
+                tx_type="EXPENSE",
+                scope=scope,
+                amount=parcel_amount,
+                description=f"{description} (parcela {i+1}/{parcels})",
+                transaction_date=f"{y}-{m:02d}-{day:02d}",
+                competence_month=None,
+                source="TELEGRAM",
+                telegram_update_id=telegram_update_id if i == 0 else None,
+                ai_category_confidence=category.get("ai_category_confidence"),
+            )
+            created.append(tx)
+
+        return {
+            "parcel_purchase": True,
+            "transactions": created,
+            "total": total_value,
+            "parcels": parcels,
+            "parcel_amount": parcel_amount,
+            "description": description,
+            "scope": scope,
+        }
+
+    # helper: shared scope detection
+    def _has_shared_scope(self, message: str, description: str) -> bool:
+        norm = _normalize_accentless(f"{message} {description}".lower())
+        triggers = ("do casal", "da casa", "casal", "conjunto", "compartilhado", "pra casa", "para casa")
+        return any(t in norm for t in triggers)
+
+    def _strip_scope_tokens(self, message: str) -> str:
+        """Remove shared-scope tokens so message regex stays intact."""
+        clean = re.sub(
+            r"\b(do|da|pro|para|pro|no|na)\s+casal\b|\bcasal\b|\bconjunto\b"
+            r"|\bcompartilhado\b|\b(pro|para)\s+casa\b",
+            " ", message, flags=re.IGNORECASE,
+        )
+        return re.sub(r"\s+", " ", clean).strip()

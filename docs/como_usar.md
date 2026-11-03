@@ -62,6 +62,26 @@
 - Em desenvolvimento (Fase 5): relatório HTML + análise IA
 - Por enquanto: /orcamento e /fixos cobrem os números
 
+### /alvo
+- Define quanto quer guardar por mês: `/alvo 800`
+- Aparece no /orcamento (projetado após reserva). Zera com `/alvo 0`
+
+### /compartilhados
+- Mostra gasto "da casa" vs pessoal no mês
+- Marque na hora da compra: `mercado 120,90 do casal no pix`
+
+### /ledger
+- Exporta o ledger completo do mês em CSV: `/ledger 2026-11`
+
+### /salario e /beneficios
+- `/salario 6500` salva o bruto; o bot projeta líquido (INSS+
+  IRRF tabelas 2025) e antecipa entradas no /orcamento
+- `/beneficios 1220` benefício fixo; sem dia = projetado no fim do mês
+
+### Pagamento de fatura por linguagem natural
+- `paguei a fatura do nubank 2500` → saída de CAIXA, não despesa
+- Gastos no cartão contam na data da compra (sem duplicar)
+
 ## Registro de Transações Naturais
 
 O bot aceita mensagens sem necessidade de comandos. Basta escrever:

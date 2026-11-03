@@ -986,6 +986,128 @@ async def beneficios_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+async def alvo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Monthly savings target: /alvo [valor] - no value shows current."""
+    user = update.effective_user
+    if not is_authorized(user.id, user.username):
+        await update.message.reply_text("Acesso negado.")
+        return
+    supabase = get_supabase()
+    app_user = AppUsersRepo(supabase).find_by_telegram_id(user.id)
+    if not app_user:
+        await update.message.reply_text("Usuário não registrado. Use /start primeiro.")
+        return
+
+    from pilas_personal_finance.services.shared_service import (
+        get_savings_target, set_savings_target,
+    )
+    args = context.args or []
+    if not args:
+        current = get_savings_target(supabase, app_user["id"], None)
+        await update.message.reply_text(
+            f"🎯 Alvo de reserva mensal: "
+            + (f"R$ {_fmt_brl(current)}" if current is not None else "não configurado")
+            + "\nDefinir: /alvo 500 | Zerar: /alvo 0"
+        )
+        return
+    raw = args[0].replace(",", ".")
+    if not re.fullmatch(r"\d+(\.\d+)?", raw):
+        await update.message.reply_text("Uso: /alvo 500")
+        return
+    value = float(raw)
+    try:
+        set_savings_target(supabase, app_user["id"], value)
+    except Exception:
+        logger.exception("alvo autal save failed")
+        await update.message.reply_text(
+            "⚠️ Não consegui salvar — a tabela app_settings existe?\n"
+            "Rode o SQL docs/0011_app_settings.sql no Supabase."
+        )
+        return
+    if value <= 0:
+        await update.message.reply_text("🎯 Alvo removido.")
+    else:
+        await update.message.reply_text(
+            f"🎯 Alvo salvo: guardar R$ {_fmt_brl(value)} por mês.\n"
+            "Aparece no /orcamento (projetado após reserva)."
+        )
+
+
+async def compartilhados_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shared-spend analysis: who spent on personal vs house (both benefit)."""
+    user = update.effective_user
+    if not is_authorized(user.id, user.username):
+        await update.message.reply_text("Acesso negado.")
+        return
+    supabase = get_supabase()
+    month = None
+    for a in (context.args or []):
+        if re.fullmatch(r"\d{4}-\d{2}", a):
+            month = a
+    if not month:
+        month = datetime.now(TZ_SAO_PAULO).strftime("%Y-%m")
+
+    from pilas_personal_finance.services.shared_service import shared_summary
+    try:
+        s = shared_summary(supabase, month)
+    except Exception:
+        logger.exception("shared summary failed")
+        await update.message.reply_text("Erro ao calcular. Tente novamente.")
+        return
+
+    lines = [f"👥 Gastos {month.replace('-', '/')} — casa vs pessoal"]
+    lines.append("")
+    lines.append(f"🏠 Casa (ambos se beneficiam): R$ {_fmt_brl(s['shared_total'])}")
+    top = list(s["shared_by_category"].items())[:5]
+    if top:
+        lines += [f"   • {c}: R$ {_fmt_brl(v)}" for c, v in top]
+    else:
+        lines.append("   (nenhum gasto marcado com 'do casal')")
+    lines.append("")
+    lines.append(f"👤 Individual: R$ {_fmt_brl(s['personal_total'])}")
+    for name, total in s["personal_by_person"].items():
+        lines.append(f"   • {name}: R$ {_fmt_brl(total)}")
+    lines.append("")
+    lines.append("Marcar: 'mercado 120,90 do casal no pix'")
+    await update.message.reply_text("\n".join(lines), reply_markup=get_main_keyboard())
+
+
+async def ledger_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Full period ledger as CSV document: /ledger [2026-11]"""
+    user = update.effective_user
+    if not is_authorized(user.id, user.username):
+        await update.message.reply_text("Acesso negado.")
+        return
+    supabase = get_supabase()
+    app_user = AppUsersRepo(supabase).find_by_telegram_id(user.id)
+    if not app_user:
+        await update.message.reply_text("Usuário não registrado. Use /start primeiro.")
+        return
+    month = None
+    for a in (context.args or []):
+        if re.fullmatch(r"\d{4}-\d{2}", a):
+            month = a
+    if not month:
+        month = datetime.now(TZ_SAO_PAULO).strftime("%Y-%m")
+
+    await update.message.chat.send_action("upload_document")
+    from pilas_personal_finance.services.shared_service import export_ledger_csv
+    try:
+        path = export_ledger_csv(supabase, app_user["id"], month)
+    except Exception:
+        logger.exception("ledger export failed")
+        path = None
+    if not path or not os.path.exists(path):
+        await update.message.reply_text("Não consegui montar o CSV.")
+        return
+    with open(path, "rb") as f:
+        await update.message.reply_document(
+            f, filename=os.path.basename(path),
+            caption=f"📒 Ledger {month} completo",
+        )
+    os.remove(path)
+
+
 async def orcamento_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /orcamento command.
 
@@ -1049,6 +1171,14 @@ async def orcamento_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += "   (não tirou dinheiro da conta; pagará no próximo payday)\n\n"
         text += "🟢 Projetado após pagar a próxima fatura:\n"
         text += f"   R$ {cf['projected_after_next_invoice']:.2f}\n"
+        try:
+            from pilas_personal_finance.services.shared_service import get_savings_target
+            alvo = get_savings_target(supabase, app_user["id"], current_month)
+        except Exception:
+            alvo = None
+        if alvo:
+            text += (f"🎯 Após reserva do alvo (R$ {_fmt_brl(alvo)}): "
+                     f"R$ {_fmt_brl(cf['projected_after_next_invoice'] - alvo)}\n")
         text += "   Entradas ainda esperadas:\n"
         text += "\n".join(expected_lines) + "\n"
         text += f"   Fixos pendentes: -R$ {cf['fixed_pending']:.2f}\n\n"
