@@ -60,90 +60,34 @@ Never claim that a test passed if it was not executed.
 ## Current Progress
 
 ### Phase 0 — Setup ✅
-- Repository initialized
-- .env configured with Telegram token, Supabase URL/secret, OpenRouter key
-- Python 3.12 + uv package manager
-- Dependencies installed: python-telegram-bot, supabase, python-dotenv, pytz
+- Repository initialized, Python 3.12 + uv, Telegram bot live against real Supabase
 
 ### Phase 1 — Banco e registros básicos ✅
-Core transaction recording via Telegram messages. **COMPLETE**.
+- Core transaction recording via natural language, 16 categories, instruments, allowlist
 
-**Completed:**
-- Database schema SQL migration (docs/0003_phase1_schema.sql)
-- 16 predefined categories (13 expenses + 3 incomes) hardcoded
-- Payment instrument types: CREDIT_CARD, DEBIT_CARD, PIX, OTHER
-- Natural language message parsing:
-  - "Almoço 42,50 no Nubank crédito" → parses value, description, instrument, type
-  - "Salário 5000" → parses income value
-  - Fallback to "Outros" category when no keyword match
-- Telegram bot handlers: /start, /ajuda, /adicionar
-- Natural message handler accepts free-text like "Gasto 30 no Nubank débito"
-- User allowlist system (configurable via ALLOWED_USER_IDS env var, also checks usernames)
-- Reply keyboards for user interaction
-- Hardcoded category list authoritative and independent of Supabase data format
-- 40+ Portuguese financial keywords mapped to categories
+### Phase 2 — Classificação por IA ✅
+- google/gemini-2.5-flash via OpenRouter (usage.include cost tracking); fallback keyword chain
 
-**Phase 1 Complete:** Two users can register transactions via natural language messages.
+### Phase 3 — Renda, benefícios e custos fixos ✅
+- income_profiles + benefit_rules; /salario (INSS/IRRF 2025 net: 6500 -> 5086.79),
+  /beneficios (FIXED_MONTHLY, no fixed date -> end of month); expected events dedupe
+  against real receipts; recurring auto-close from natural messages
 
-### Phase 2 — Classificação por IA 🔨 IN PROGRESS
-OpenRouter economic model integration for automatic category classification.
+### Phase 4 — Contas a receber e orçamento ✅
+- Receivables fully natural-language: "joao me deve 80 do jantar" / "joao me pagou 50" /
+  "recebi 50 do joao" (partial/full, deterministic debtor match, linked INCOME tx)
+- /orcamento: two-axes (CAIXA vs CARTAO) for the credit-card PAY regime;
+  invoice payments are cash transfers (is_card_invoice_payment flag - docs/0010)
+- /resumo /analise /relatorio (Jinja2 HTML + validated AI commentary)
 
-**Completed:**
-- AI service implemented (communicates with OpenRouter API)
-- AI usage tracking service (tokens, costs estimated in BRL)
-- Fallback chain: AI classification → keyword matching → "Outros"
-- 40+ Portuguese financial keywords mapped to 16 categories
-- Confidence threshold: >= 0.7 use AI, < 0.7 use fallback
-- Classification stored with ai_category_confidence on each transaction
-- Full end-to-end flow tested: message parse → category assign → transaction record
+### Extra features (user requests, 2026-11-03) ✅
+- /alvo savings target (app_settings - docs/0011 SQL needs running)
+- scope SHARED via "do casal" NL + /compartilhados analysis
+- /ledger CSV export
+- Installments NL: "1500 em 3x no credito" creates parcel per future month
 
-**Remaining:**
-- Configure OPENROUTER_API_KEY and AI_DEFAULT_MODEL in .env for live AI classification
-- Test end-to-end with actual bot token
-- Phase 3 (Renda, benefícios e custos fixos) depends on Phase 2 completion
-
-### Phase 3 — Renda, benefícios e custos fixos 🔨 IN PROGRESS
-- Salary/benefit profiles implemented with deterministic Python calculations
-- Recurring expenses module with occurrence tracking
-- Budget projection with /orcamento command
-- Benefits by workday calculation (VR/VA)
-- Calendar with holidays configuration
-- Receivables module ("me deve") - planned for Phase 4
-
-**Completed:**
-- Benefit service (benefit_service.py): calculate_benefit_by_day() and calculate_irrrf()
-- Recurring expense service (recurring_expense_service.py): create_recurring_expense(), get_user_recurring_expenses(), calculate_budget_projection()
-- Phase 3 schema SQL (docs/0007_phase3_schema.sql): benefit_rules, recurring_expenses, recurring_expense_occurrences, receivables, receivable_payments tables
-- Hardcoded INSS/IRRF tables in Python (versionadas por vigência)
-- Keyword mapping and category resolution continues from Phase 2
-
-**Remaining:**
-- End-to-end testing with actual bot token
-- /fixos command implementation
-- /receber command implementation  
-- /orcamento command with full budget projection
-- User interface for benefit configuration and recurring expense management
-- Calendar/holiday configuration UI
-
-### Phase 4 — Contas a receber e orçamento projected (pending)
-- Receivables module ("me doit") - planned after Phase 3 core is stable
-- Budget calculation refinements with received amounts
-
-### Phase 5 — Análises e relatório HTML (pending)
-- /relatorio command
-- Jinja2 HTML templates
-- IA commentary integration
+### Phase 5 — Análises e relatório HTML ✅
+- /relatorio [mes|individual|casal|2026-11], fixed template, AI JSON validated
 
 ### Phase 6 — Monitoramento de IA (pending)
-- Token/cost tracking (already implemented in AI Usage Service)
-- Monthly limits and alerts
-
 ### Phase 7 — Importação CSV (pending)
-- CSV file upload via Telegram
-- Column mapping and duplicate detection
-
----
-
-**Last update:** 2026-11-01
-**Current developer:** Gabriel (opencode)
-**Next step:** Configure OPENROUTER_API_KEY in .env and test end-to-end with actual bot token
