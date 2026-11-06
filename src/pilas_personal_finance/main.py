@@ -21,6 +21,7 @@ from pilas_personal_finance.bot.handlers import (
     alvo_command, compartilhados_command, ledger_command,
     ia_status_command, ia_limite_command, ia_uso_command,
     handle_csv_import, import_confirm_command, import_cancel_command,
+    import_command,
 )
 from pilas_personal_finance.bot.keyboards import get_main_keyboard
 from supabase import create_client
@@ -60,6 +61,7 @@ COMMAND_LIST = [
     ("ia_status", "Consumo da IA e limite"),
     ("ia_limite", "Orçamento mensal da IA"),
     ("ia_uso", "Uso por operação/modelo"),
+    ("import", "Importar CSV/montaréu (colar texto)"),
 ]
 
 
@@ -116,6 +118,14 @@ def main():
     application.add_handler(CommandHandler("ia_status", ia_status_command))
     application.add_handler(CommandHandler("ia_limite", ia_limite_command))
     application.add_handler(CommandHandler("ia_uso", ia_uso_command))
+    application.add_handler(CommandHandler("import", import_command))
+    application.add_handler(CommandHandler("import_confirm", import_confirm_command))
+    application.add_handler(CommandHandler("import_cancel", import_cancel_command))
+
+    # CSV attachments (Document) - must be registered BEFORE the text handler
+    application.add_handler(
+        MessageHandler(filters.Document.ALL & ~filters.COMMAND, handle_csv_import)
+    )
 
     # Central error handler
     application.add_error_handler(on_error)

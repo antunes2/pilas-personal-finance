@@ -241,7 +241,7 @@ def commit_bulk(supabase: Client, user_uuid: str, chat_id: int,
         raise ImportError_("Nada em aberto para confirmar")
 
     from pilas_personal_finance.services.transaction_service import (
-        TransactionService, HARDCODED_CATEGORIES_EXPENSE,
+        TransactionService, HARDCODED_CATEGORIES_EXPENSE, INCOME_KEYWORD_MAP,
     )
     svc = TransactionService(supabase)
     user = svc.users_repo.find_by_telegram_id(telegram_user_id)
@@ -250,6 +250,15 @@ def commit_bulk(supabase: Client, user_uuid: str, chat_id: int,
 
     from pilas_personal_finance.repositories import PaymentInstrumentsRepo
     inst_repo = PaymentInstrumentsRepo(supabase)
+
+    # ONE batch AI call for all expense/card descriptions (cheaper and
+    # more consistent than per-movement single calls).
+    from pilas_personal_finance.services import ai_bulk_service
+    descs = [m.get("description") or "Movimento importado"
+             for m in state["bulk_movements"] if m.get("type") != "INCOME"]
+    title_category = (ai_bulk_service.categorize_batch(
+        svc.ai_service, list(dict.fromkeys(descs))[:120],
+        HARDCODED_CATEGORIES_EXPENSE) or {})
 
     def _resolve_instrument(name: Optional[str], is_card: bool):
         if not name:
@@ -287,22 +296,48 @@ def commit_bulk(supabase: Client, user_uuid: str, chat_id: int,
                     created += 1
                     summary.append(f"ent. R$ {value:.2f} de {mov['receivable_debtor']}")
                     continue
-            svc.register_income_message(
-                telegram_user_id, f"{desc} {value:.2f}", telegram_update_id=None)
+            # Deterministic structured income: NEVER re-parse NL text here
+            # (description may contain digits like 'dia 02/11' and the
+            # first-number extraction would grab them; e.g. 02 -> R$ 2.00).
+            norm_desc = _na(desc).lower()
+            cat_name = "Outras Entradas"
+            for keyword, cat in INCOME_KEYWORD_MAP.items():
+                if _na(keyword) in norm_desc:
+                    cat_name = cat
+                    break
+            svc.transactions_repo.create(
+                user_id=uuid.UUID(user["id"]),
+                category_id=svc._resolve_category_db_id(
+                    {"id": cat_name, "name": cat_name,
+                     "transaction_type": "INCOME"}),
+                payment_instrument_id=None,
+                tx_type="INCOME",
+                scope=scope,
+                amount=value,
+                description=desc,
+                transaction_date=date,
+                competence_month=None,
+                source="TELEGRAM",
+                telegram_update_id=None,
+                ai_category_confidence=None,
+            )
             created += 1
             summary.append(f"ent. R$ {value:.2f} {desc[:24]}")
             continue
 
         instrument = _resolve_instrument(mov.get("instrument"),
                                          mov["type"] == "CARD")
-        category = svc._determine_category_with_ai(
-            desc, HARDCODED_CATEGORIES_EXPENSE)[0] \
-            or {"id": "Outros", "name": "Outros", "transaction_type": "EXPENSE"}
+        ai_cat = title_category.get(desc) or {}
+        category_name = ai_cat.get("categoria") or "Outros"
+        if category_name not in HARDCODED_CATEGORIES_EXPENSE:
+            category_name = "Outros"
+        category = {"id": category_name, "name": category_name,
+                    "transaction_type": "EXPENSE"}
 
         if parcels and parcels > 1:
             svc._register_parcel_purchase(
                 user, category, instrument, desc, scope,
-                value, parcels, None)
+                value, parcels, None, start_date=date)
             created += parcels
             summary.append(
                 f"cart. {desc[:20]} {parcels}x de "

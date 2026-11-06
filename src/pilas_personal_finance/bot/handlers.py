@@ -171,19 +171,42 @@ async def ajuda_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/fixos pagos - Listar despesas recorrentes pagas e pendentes\n"
         "/pagar - Marcar ocorrência como paga e registrar pagamento\n"
         "/receber - Registrar/consultar valores a receber\n"
+        "/recebimentos - Listar contas a receber\n"
+        "/registrar - Registrar recebimento (parcial) de alguém\n"
         "/orcamento - Disponível agora e projetado até o fim do mês\n"
-        "/relatorio - Gerar relatório HTML\n"
+        "/relatorio - Gerar relatório HTML (ex: /relatorio 2026-11)\n"
+        "/resumo - Resumo do período\n"
+        "/analise - Análise textual por IA do mês\n"
+        "/salario - Configurar salário bruto\n"
+        "/beneficios - Configurar benefício fixo (VR/VA/VT)\n"
+        "/alvo - Alvo de guardado mensal\n"
+        "/compartilhados - Gasto casa vs pessoal\n"
+        "/ledger - Exporta todos os movimentos em CSV\n"
+        "/ia_status - Consumo da IA e limite\n"
+        "/import - Importar CSV (anexo) ou montaréu (texto)\n"
+        "/import_confirm - Grava lote em prévia\n"
+        "/import_cancel - Descarta lote em prévia\n"
         "/categorias - Listar categorias válidas\n"
         "/cartoes - Listar instrumentos de pagamento\n"
-        "/resumo - Resumo do período\n"
         "\n"
         "Mensagens naturais também são aceitas sem comandos:\n"
         "- `Almoço 42,50 no Nubank crédito`\n"
         "- `Salário 5000`\n"
         "- `Uber 18,90 no Inter débito`\n"
         "- `VR 38,00 no vale refeição`\n"
+        "- `João me deve 80 do jantar` / `João me pagou 50`\n"
+        "- `1500 em 3x no crédito` (parcelado)\n"
+        "- `do casal` no fim = gasto compartilhado\n"
         "\n"
-        "Use /menu para ver o menu interativo."
+        "Montaréu (vários lançamentos de uma vez):\n"
+        "- `movimentos: gastei 85 na padaria no pix, uber 32 no credito`"
+        " nubank, mercado 320 do casal, joana me pagou 200`\n"
+        "- Também funciona sem o prefixo se tiver vários valores;\n"
+        " a IA identifica entradas/saídas/cartão/datas/parcelas\n"
+        "- Confirme com /import_confirm após a prévia\n"
+        "\n"
+        "CSV: anexe o arquivo do banco (Nubank/generico) com legenda "
+        "`/import Nubank`"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -1178,6 +1201,23 @@ async def handle_csv_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("Confirmar gravação: /import_confirm")
     lines.append("Descartar: /import_cancel")
     await update.message.reply_text("\n".join(lines))
+
+
+async def import_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Visible /import: explains the two ways to import."""
+    user = update.effective_user
+    if not is_authorized(user.id, user.username):
+        await update.message.reply_text("Acesso negado.")
+        return
+    await update.message.reply_text(
+        "📥 Importar movimentos — duas formas:\n"
+        "\n1. CSV: anexe o arquivo e escreva na legenda /import Nubank"
+        "\n   (ou outro banco; layouts Nubank e genérico)"
+        "\n\n2. Montaréu: cole um texto solto com vários lançamentos"
+        "\n   ex: 'movimentos: gastei 85 na padaria no pix,"
+        "\n   uber 32 no credito nubank, joana me pagou 200'"
+        "\n\nDepois: /import_confirm grava | /import_cancel descarta"
+    )
 
 
 async def import_confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

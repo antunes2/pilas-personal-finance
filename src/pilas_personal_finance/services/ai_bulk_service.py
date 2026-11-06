@@ -18,16 +18,36 @@ from pilas_personal_finance.services.transaction_service import (
 
 logger = logging.getLogger(__name__)
 
-BULK_TRIGGERS = ("movimentos:", "registros:", "varias compras", "vários gastos",
-                 "varias movimentacoes", "varias movimentações", "bulk:")
+BULK_TRIGGERS = ("movimentos:", "registros:", "varias compras", "vários compras",
+                 "vários gastos", "varios gastos", "varias movimentacoes",
+                 "varias movimentações", "vários movimentos", "bulk:", "varios:")
 
 MAX_BULK_ITEMS = 50
 CATEGORIZE_MAX_TITLES = 120
 LOW_CONFIDENCE_THRESHOLD = 0.55
 
 
+_MONEY_RE = re.compile(
+    r"(?<![\d.,])(?:\d{1,3}(?:\.\d{3})+|\d+)(?:[.,]\d{2}(?![\d.,]))?(?!\d)")
+_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2}|\d{1,2}[/\-]\d{1,2}(?:[/\-]\d{2,4})?)")
+
+# verbo/termo de movimento para o fallback sem prefixo
+_MOVEMENT_VERBS = ("gastei", "paguei", "recebi", "passei", "entrou", "comprei",
+                   "coloquei", "carreguei", "me pagou", "me deve", "no cartao",
+                   "no cartão", "no pix", "no debito", "no débito", "no credito",
+                   "no crédito")
+
+
 def is_bulk_text(message: str) -> bool:
-    return any(message.strip().lower().startswith(t) for t in BULK_TRIGGERS)
+    text = message.strip().lower()
+    if any(t in text for t in BULK_TRIGGERS):
+        return True
+    # sem prefixo: 3+ valores monetários (após remover datas)
+    stripped = _DATE_RE.sub(" ", text)
+    amounts = _MONEY_RE.findall(stripped)
+    if len(amounts) >= 3 and any(v in text for v in _MOVEMENT_VERBS):
+        return True
+    return False
 
 
 def _record(ai: Dict[str, Any], operation: str) -> None:

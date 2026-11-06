@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 import unicodedata
 from typing import Optional, List, Dict, Any
 import re
-from datetime import datetime
+from datetime import date, datetime
 from supabase import Client
 
 from pilas_personal_finance.services.ai_service import AIService
@@ -830,12 +830,16 @@ class TransactionService:
 
     def _register_parcel_purchase(self, user, category, instrument, description,
                                   scope, total_value, parcels,
-                                  telegram_update_id) -> Dict[str, Any]:
+                                  telegram_update_id,
+                                  start_date: Optional[str] = None) -> Dict[str, Any]:
         """Create one EXPENSE transaction per month (purchase + future
         installments in following months, on the same day of month).
 
         Deterministic - no AI. The invoice of month M includes parcel M;
         cash axis handles payment timing automatically.
+
+        start_date (YYYY-MM-DD): month/day anchor for the first parcel
+        (e.g. bulk parse); defaults to today.
         """
         import calendar
         from datetime import datetime, timedelta
@@ -843,6 +847,11 @@ class TransactionService:
 
         tz = pytz.timezone("America/Sao_Paulo")
         base_date = datetime.now(tz).date()
+        if start_date:
+            try:
+                base_date = date.fromisoformat(str(start_date)[:10])
+            except ValueError:
+                pass
         parcel_amount = round(total_value / parcels, 2)
         created = []
 
