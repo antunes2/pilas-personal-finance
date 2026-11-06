@@ -99,3 +99,10 @@ Never claim that a test passed if it was not executed.
 ### Phase 7 — Importação CSV ✅
 - /import via CSV attachment caption; staged preview; /import_confirm /import_cancel
 - Nubank/generic layouts; dupe triple check; 1 MB/500 rows guard; source=CSV_IMPORT
+- Bulk AI finished (2026-11-05, 62e0bf4): /import single-call categorization with
+  QA round; free-form "movimentos:" bulk parse; bulk trigger also fires on 3+
+  amounts without prefix; commit_bulk = structured deterministic income (no NL
+  re-parse - digits in desc bug fixed), batch AI categorization (ONE call),
+  parcels follow parsed start_date; /ajuda + /import handlers registered
+  (were imported but never add_handler'ed - why nothing fired)
+- Phase 8 (next): hospedagem/deploy
