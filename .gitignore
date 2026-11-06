@@ -32,3 +32,5 @@ SUPABASE_SECRET_KEY=
 
 # Always add your specific user IDs to .env, not here
 # ALLOWED_USER_IDS=123456789,987654321
+# secrets
+.env

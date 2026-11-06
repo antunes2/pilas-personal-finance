@@ -1,7 +1,7 @@
 [project]
 name = "pilas-personal-finance"
 version = "0.1.0"
-description = "Add your description here"
+description = "Bot Telegram de controle financeiro pessoal (Supabase + IA)"
 readme = "README.md"
 authors = [
     { name = "Gabriel Antunes Lima", email = "gabrielantunes222@gmail.com" }
