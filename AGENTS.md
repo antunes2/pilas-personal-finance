@@ -85,6 +85,9 @@ Never claim that a test passed if it was not executed.
 - scope SHARED via "do casal" NL + /compartilhados analysis
 - /ledger CSV export
 - Installments NL: "1500 em 3x no credito" creates parcel per future month
+- Bulk AI (2026-11-04): /import gets single-call AI categorization with QA
+  round (low confidence -> user answers); free-form "movimentos:" text bulk
+  parse (entradas/saídas/cartão/casal/parcelas/recebível/datas) - ai_bulk_service
 
 ### Phase 5 — Análises e relatório HTML ✅
 - /relatorio [mes|individual|casal|2026-11], fixed template, AI JSON validated

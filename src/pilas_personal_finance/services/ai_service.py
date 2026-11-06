@@ -59,6 +59,72 @@ class AIService:
         if not self.api_key:
             logger.warning("OPENROUTER_API_KEY not set - AI classification disabled")
 
+    def _call_openrouter(self, system: str, user_prompt: str,
+                         temperature: float = 0.0) -> Optional[Dict[str, Any]]:
+        """Single OpenRouter call with usage tracking. Shared by all AI
+        features (classification, bulk parsing, batch categorization).
+
+        Returns dict: content, input_tokens, output_tokens, cost_usd,
+        request_id or None.
+        """
+        if not self.api_key:
+            return None
+        try:
+            import httpx
+
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "http://localhost:8000",
+                "X-Title": "Personal Finance Bot",
+            }
+
+            payload = {
+                "model": self.default_model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": temperature,
+                "usage": {"include": True},
+            }
+
+            response = httpx.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=60,
+            )
+
+            if response.status_code != 200:
+                logger.error(f"OpenRouter API error: {response.status_code} - {response.text}")
+                return None
+
+            result = response.json()
+            message_content = result["choices"][0]["message"]["content"]
+            usage = result.get("usage", {}) or {}
+            return {
+                "content": message_content,
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+                "cost_usd": usage.get("cost"),
+                "request_id": result.get("id"),
+            }
+        except Exception as e:
+            logger.error(f"OpenRouter call failed: {e}")
+            return None
+
+    def _parse_json_loose(self, content: str) -> Optional[Any]:
+        """Parse AI output tolerating markdown fences."""
+        try:
+            raw = content.strip()
+            if raw.startswith("```"):
+                raw = re.sub(r"^```[a-zA-Z]*\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+            return json.loads(raw.strip())
+        except (json.JSONDecodeError, ValueError):
+            return None
+
     def classify(self, description: str, categories: List[Any]) -> Optional[Dict[str, Any]]:
         """Classify a transaction description using AI.
 

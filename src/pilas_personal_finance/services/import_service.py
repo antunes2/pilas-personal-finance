@@ -1,3 +1,7 @@
+import uuid
+
+from pilas_personal_finance.services.transaction_service import _normalize_accentless as _na
+
 """CSV import (Phase 7 - spec: bonus, at least one bank format, safely).
 
 Flow: attach CSV with caption "/import <bank>" -> parse + preview +
@@ -168,13 +172,31 @@ def commit_import(supabase: Client, user_uuid: str, chat_id: int,
         )
 
     saved, skipped = [], 0
+
+    # AI/user-categorized titles from the QA round (optional)
+    forced_titles = state.get("title_category") or {}
+    cat_ids: Dict[str, Any] = {}
+    if forced_titles:
+        wanted = {_na(n.lower()) for n in set(forced_titles.values()) - {None} if n}
+        cats = supabase.from_("categories").select("id, name").execute().data or []
+        cat_ids = {c["id"]: None for c in cats}  # placeholder cleared below
+        cat_ids = {}
+        for c in cats:
+            if _na(c["name"].lower()) in wanted:
+                cat_ids[c["name"].lower()] = c["id"]
+
+
     for row in state["rows"]:
         if _exists_same_triple(supabase, user_uuid, row):
             skipped += 1
             continue
+        forced_cat_id = None
+        forced_name = forced_titles.get(row["title"])
+        if forced_name:
+            forced_cat_id = cat_ids.get(forced_name.lower())
         r = supabase.from_("transactions").insert({
             "user_id": user_uuid,
-            "category_id": None,
+            "category_id": forced_cat_id,
             "payment_instrument_id": instrument["id"],
             "type": "EXPENSE",
             "scope": "PERSONAL",
@@ -192,3 +214,121 @@ def commit_import(supabase: Client, user_uuid: str, chat_id: int,
     _PENDING.pop(chat_id, None)
     return {"saved": len(saved), "skipped": skipped,
             "instrument": instrument["name"], "total_rows": len(state["rows"])}
+
+
+# ------------------------------------------------------------------
+# Free-form bulk staging ("montaréu") - same chat-scoped staging model
+# ------------------------------------------------------------------
+
+def stage_bulk(chat_id: int, movements: List[Dict[str, Any]],
+               dropped: int, raw_count: int) -> Dict[str, Any]:
+    _PENDING[chat_id] = {"bulk_movements": movements,
+                         "dropped": dropped, "raw_count": raw_count}
+    return {"count": len(movements), "dropped": dropped}
+
+
+def commit_bulk(supabase: Client, user_uuid: str, chat_id: int,
+                telegram_user_id: int) -> Dict[str, Any]:
+    """Create transactions from staged (already validated) bulk movements.
+
+    Deterministic from here: instruments resolved/created, scope SHARED,
+    INCOME/EXPENSE/CARD-parcel behavior mirrors the single-message flows,
+    including recurring auto-close. telegram_update_id stays None (column
+    is UNIQUE; bulk rows must not collide or block legit later messages).
+    """
+    state = _PENDING.get(chat_id)
+    if not state or "bulk_movements" not in state:
+        raise ImportError_("Nada em aberto para confirmar")
+
+    from pilas_personal_finance.services.transaction_service import (
+        TransactionService, HARDCODED_CATEGORIES_EXPENSE,
+    )
+    svc = TransactionService(supabase)
+    user = svc.users_repo.find_by_telegram_id(telegram_user_id)
+    if not user:
+        raise ImportError_("Usuário não registrado")
+
+    from pilas_personal_finance.repositories import PaymentInstrumentsRepo
+    inst_repo = PaymentInstrumentsRepo(supabase)
+
+    def _resolve_instrument(name: Optional[str], is_card: bool):
+        if not name:
+            if is_card:
+                owner = inst_repo.find_by_owner(user["id"]) or []
+                return next((i for i in owner
+                             if i.get("instrument_type") == "CREDIT_CARD"), None)
+            return None
+        for i in inst_repo.find_by_owner(user["id"]) or []:
+            if _na(name) in _na(i["name"]) \
+                    and (not is_card or i.get("instrument_type") == "CREDIT_CARD"):
+                return i
+        return inst_repo.create(
+            name=name[:20],
+            instrument_type="CREDIT_CARD" if is_card else "OTHER",
+            owner_user_id=user["id"])
+
+    created = 0
+    summary: List[str] = []
+    for mov in state["bulk_movements"]:
+        scope = "SHARED" if mov.get("scope_shared") else "PERSONAL"
+        desc = mov.get("description") or "Movimento importado"
+        value = float(mov["amount"])
+        date = mov.get("date") or svc._parse_date("hoje")
+        parcels = mov.get("parcelas")
+
+        if mov["type"] == "INCOME":
+            if mov.get("receivable_debtor"):
+                pay = svc.register_receivable_payment_by_message(
+                    telegram_user_id,
+                    f"{mov['receivable_debtor']} me pagou {value}",
+                    telegram_update_id=None,
+                )
+                if pay:
+                    created += 1
+                    summary.append(f"ent. R$ {value:.2f} de {mov['receivable_debtor']}")
+                    continue
+            svc.register_income_message(
+                telegram_user_id, f"{desc} {value:.2f}", telegram_update_id=None)
+            created += 1
+            summary.append(f"ent. R$ {value:.2f} {desc[:24]}")
+            continue
+
+        instrument = _resolve_instrument(mov.get("instrument"),
+                                         mov["type"] == "CARD")
+        category = svc._determine_category_with_ai(
+            desc, HARDCODED_CATEGORIES_EXPENSE)[0] \
+            or {"id": "Outros", "name": "Outros", "transaction_type": "EXPENSE"}
+
+        if parcels and parcels > 1:
+            svc._register_parcel_purchase(
+                user, category, instrument, desc, scope,
+                value, parcels, None)
+            created += parcels
+            summary.append(
+                f"cart. {desc[:20]} {parcels}x de "
+                f"R$ {round(value / parcels, 2):.2f}")
+            continue
+
+        tx = svc.transactions_repo.create(
+            user_id=uuid.UUID(user["id"]),
+            category_id=svc._resolve_category_db_id(category),
+            payment_instrument_id=(uuid.UUID(instrument["id"])
+                                   if instrument and instrument.get("id") else None),
+            tx_type="EXPENSE",
+            scope=scope,
+            amount=value,
+            description=desc,
+            transaction_date=date,
+            competence_month=None,
+            source="TELEGRAM",
+            telegram_update_id=None,
+            ai_category_confidence=None,
+        )
+        svc._maybe_mark_recurring_as_paid(tx, user["id"])
+        created += 1
+        summary.append(f"gasto R$ {value:.2f} {desc[:24]}")
+
+    _PENDING.pop(chat_id, None)
+    return {"created": created, "summary": summary}
+
+

@@ -8,7 +8,7 @@ import os
 import io
 import logging
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict
 import pytz
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ContextTypes, MessageHandler, filters, CommandHandler
@@ -749,6 +749,12 @@ def _fmt_brl(v: float) -> str:
     return s.replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def _normalize_message(msg: str) -> str:
+    from pilas_personal_finance.services.transaction_service import \
+        _normalize_accentless
+    return _normalize_accentless(msg).lower().strip()
+
+
 async def ia_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """AI consumption this month vs limit (spec §10)."""
     user = update.effective_user
@@ -1104,6 +1110,7 @@ async def handle_csv_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = buf.getvalue()
 
     from pilas_personal_finance.services import import_service
+    from pilas_personal_finance.services import ai_bulk_service
     try:
         st = import_service.stage_import(update.effective_chat.id, data, bank_hint)
     except import_service.ImportError_ as e:
@@ -1115,6 +1122,33 @@ async def handle_csv_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     rows = st["rows"]
+
+    # AI categorization round (single call; low-confidence -> QA)
+    title_category: Dict[str, Optional[str]] = {}
+    needs_reading: List[str] = []
+    try:
+        cats = ai_bulk_service.categorize_batch(
+            TransactionService(supabase).ai_service,
+            [r["title"] for r in rows],
+            HARDCODED_CATEGORIES_EXPENSE,
+        )
+        if cats:
+            for r in rows:
+                info = cats.get(r["title"]) or {}
+                cat = info.get("categoria")
+                title_category[r["title"]] = cat
+                if info.get("needs_reading") or cat is None:
+                    needs_reading.append(r["title"])
+            import_service.get_pending(update.effective_chat.id)[
+                "title_category"] = title_category
+    except Exception:
+        logger.exception("batch categorize failed; skipping AI step")
+
+    ai_note = ""
+    if title_category:
+        n_ok = sum(1 for v in title_category.values() if v)
+        ai_note = f"\n🧠 IA categorizou {n_ok}/{len(rows)} com confiança."
+
     preview = rows[:3]
     lines = [f"📥 {st['bank']}: {len(rows)} movimentos"]
     lines.append("")
@@ -1124,6 +1158,22 @@ async def handle_csv_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"  ... e mais {len(rows) - 3}")
     if st["bad_dates"]:
         lines.append(f"⚠️ {st['bad_dates']} datas fora do padrão")
+    lines.append("")
+    lines.append(ai_note)
+    if needs_reading:
+        first = needs_reading[0]
+        from pilas_personal_finance.services.import_service import get_pending
+        pending = get_pending(update.effective_chat.id)
+        pending["qa"] = {"items": needs_reading[:10],
+                         "idx": 0, "answers": {}}
+        lines += [
+            "",
+            f"🧠 Preciso de ajuda com {min(len(needs_reading), 10)} título(s)"
+            " de baixa confiança:",
+            f"1) O que é: {first[:60]!r}",
+            "Responda com a categoria (ex: 'alimentação') ou 'pular'.",
+            "Sair sem responder tudo: 'pronto'.",
+        ]
     lines.append("")
     lines.append("Confirmar gravação: /import_confirm")
     lines.append("Descartar: /import_cancel")
@@ -1141,6 +1191,20 @@ async def import_confirm_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("Usuário não registrado. Use /start primeiro.")
         return
     from pilas_personal_finance.services import import_service
+    state = import_service.get_pending(update.effective_chat.id)
+    if state and "bulk_movements" in state:
+        try:
+            out = import_service.commit_bulk(
+                supabase, app_user["id"], update.effective_chat.id, user.id)
+        except import_service.ImportError_ as e:
+            await update.message.reply_text(f"❌ {e}")
+            return
+        summary = out.get("summary") or []
+        extra = "\n" + "\n".join(f"  • {s}" for s in summary[:12]) if summary else ""
+        await update.message.reply_text(
+            f"✅ Montaréu gravado: {out['created']} movimento(s)." + extra
+        )
+        return
     try:
         out = import_service.commit_import(
             supabase, app_user["id"], update.effective_chat.id,
@@ -1421,6 +1485,98 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     supabase = get_supabase()
     service = TransactionService(supabase)
+    messaging = update.effective_chat.id
+
+    # QA round for CSV categorization (answers 'alimentacao', 'pular'...)
+    from pilas_personal_finance.services import import_service
+    pending_state = import_service.get_pending(messaging)
+
+    def finish_csv_qa(ans: Dict[str, Optional[str]]) -> List[str]:
+        tc = import_service.get_pending(messaging).setdefault("title_category", {})
+        for title, cat in ans.items():
+            tc[title] = cat
+        import_service.get_pending(messaging)["qa"] = None
+        return ["✅ Categorias aplicadas. /import_confirm para gravar."]
+
+    if pending_state and pending_state.get("qa"):
+        qa = pending_state["qa"]
+        raw = _normalize_message(message_text)
+        title = qa["items"][qa["idx"]]
+        answer = raw.lower().strip()
+
+        if answer in ("pronto", "sair", "cancelar"):
+            reply_lines = finish_csv_qa(qa["answers"])
+        elif answer in ("pular", "skip", "outros"):
+            qa["answers"][title] = None
+            qa["idx"] += 1
+            reply_lines = []
+        else:
+            from pilas_personal_finance.services.transaction_service import (
+                HARDCODED_CATEGORIES_EXPENSE as _cat_list,
+            )
+            norm_ans = _normalize_message(answer)
+            mapped = None
+            for c in _cat_list:
+                norm_c = _normalize_message(c.lower())
+                if norm_c and (norm_c == norm_ans or norm_c in norm_ans
+                               or norm_ans in norm_c):
+                    mapped = c
+                    break
+            if mapped:
+                qa["answers"][title] = mapped
+                qa["idx"] += 1
+                reply_lines = []
+            else:
+                reply_lines = [
+                    "Categoria não reconhecida. Use uma das 14 (ex:"
+                    " 'alimentação', 'transporte', 'gastos casa') ou"
+                    " 'pular' / 'pronto'."
+                ]
+
+        if reply_lines == [] and qa["idx"] < len(qa["items"]):
+            remaining = len(qa["items"]) - len(qa["answers"])
+            nxt = qa["items"][qa["idx"]]
+            reply_lines = [
+                f"({len(qa['answers'])} respondidas, {remaining} restantes)",
+                f"O que é: {nxt[:60]!r}",
+                "Categoria? ('pular' = Outros; 'pronto' encerra)",
+            ]
+        elif reply_lines == []:
+            reply_lines = finish_csv_qa(qa["answers"])
+        await update.message.reply_text("\n".join(reply_lines))
+        return
+
+    # Bulk free-form trigger ("movimentos: ...") parses many movements via AI
+    from pilas_personal_finance.services import ai_bulk_service
+    if ai_bulk_service.is_bulk_text(message_text):
+        try:
+            parsed = ai_bulk_service.parse_bulk_text(
+                service.ai_service, message_text)
+        except Exception:
+            logger.exception("bulk parse failed")
+            parsed = None
+        if not parsed:
+            await update.message.reply_text(
+                "Não consegui interpretar o bloco. Tente de novo ou"
+                " registre normalmente.")
+            return
+        import_service.stage_bulk(
+            messaging, parsed["movimentos"], parsed.get("dropped", 0),
+            parsed.get("raw_count", len(parsed["movimentos"])))
+        lines = [f"🧠 Parseiei {len(parsed['movimentos'])} movimento(s):"]
+        for mov in parsed["movimentos"][:8]:
+            kind = {"INCOME": "ent.", "EXPENSE": "gasto", "CARD": "cartão"}.get(
+                mov["type"], mov["type"])
+            parcels = f" {mov['parcelas']}x" if mov.get("parcelas") else ""
+            shared = " (casa)" if mov.get("scope_shared") else ""
+            date = f" {mov['date']}" if mov.get("date") else ""
+            lines.append(f"  {kind}{parcels} R$ {_fmt_brl(mov['amount'])}"
+                         f" — {mov['description'][:40]}{shared}{date}")
+        if parsed.get("dropped"):
+            lines.append(f"(descartei {parsed['dropped']} item(ns) inválido(s))")
+        lines += ["", "Gravar: /import_confirm | Descartar: /import_cancel"]
+        await update.message.reply_text("\n".join(lines))
+        return
 
     # 0. Card invoice payment ("paguei a fatura do nubank 2500") - cash out,
     #    NOT an expense; must win before income/expense paths.

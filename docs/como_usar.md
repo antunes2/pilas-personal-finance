@@ -92,6 +92,16 @@
 - Prévia + contagem + `/import_confirm` para gravar ou `/import_cancel`
 - Duplicatas (mesma data+valor+descrição) são ignoradas; limite 1 MB
 - Gastos entram como EXPENSE no instrumento do banco; categoria 'Outros'
+- 🧠 A IA categoriza os títulos na hora; títulos de baixa confiança viram
+  perguntas ("O que é X?") - responda com a categoria, 'pular' ou 'pronto'
+
+### Upload em lote por texto livre ("montaréu")
+- Comece a mensagem com "movimentos:" e descreva tudo solto, do jeito que
+  sair: "movimentos: gastei 85 na padaria hoje no pix, uber 32 ontem no
+  credito nubank, mercado 320 do casal no cartao, celular 1200 em 3x no
+  nubank, joana me pagou 200, salario 6500 dia 02/11"
+- A IA identifica entradas/saídas/cartão/casal/parcelas/recebível/datas
+- Prévia + /import_confirm grava tudo; /import_cancel descarta
 
 ## Registro de Transações Naturais
 
